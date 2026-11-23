@@ -15,3 +15,4 @@ All notable changes to this project are listed here. The format follows
 - `scripts/build.ps1`: one-command build from a Visual Studio x64 environment.
 - `scripts/lift.ps1`: the whole lift pipeline in one command.
 - Boots through the logos and title screen into the main menu: D3D fence and XMV movie overrides, XAPI pad input from the host pad, keyboard or a scripted pad, and the runtime options the game needs on by default. Movies are skipped for now.
+- A game window and the D3D8 renderer (OpenGL ES 3 on ANGLE, from the Sneak King recomp), fed by the game's own D3D calls. The picture is still black: the game's 2D is not decoded yet.

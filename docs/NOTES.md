@@ -57,6 +57,37 @@ How things work and what was found, one section per area. Addresses are guest vi
 - With `RECOMP_PAD_SCRIPT` pressing Start every 0.7 s, the title opens the main menu (`menu\bin\mainmenu_locz.med`, `menu\fe_me*`, `menu\fe_bg*`) and loads `map\m200\` and `menu\m000prm.dat` about 3 s into the script, before any A press; most likely the menu's 3D background rather than a stage. 74 further presses load nothing else. No crash or untranslated instruction in 85 s.
 - XPP's USB code reaches `cli`/`sti` at `0x001F456B`/`0x001F457C` when the OHCI model is on; harmless as no-ops.
 
+## Renderer (M3)
+
+- D3D names and globals from XbSymbolDatabase v3.1.160 (`XbSymbolDatabaseCLI.exe default.xbe -e`, 380 symbols). It confirms 18 of the first game's D3D fixes the comparison left unconfirmed. Globals: `D3D_g_pDevice` `0x001EE1F8`, `D3D_g_RenderState` `0x001EE208` (deferred block at index 92, complex at 136, as in the renderer's XDK 5849 enum), `D3D_g_DeferredTextureState` `0x001EBB40`, `D3D_g_Stream` `0x001EF1C8`. Not found: `CreatePixelShader` and the pushbuffer recording functions (`BeginPush`, `EndPush`, `BeginPushBuffer`, `RunPushBuffer`).
+- The renderer is the Sneak King recomp's `gl_hle.c` (XDK 5849, fixed function and NV2A vertex programs on OpenGL ES 3), in `src/render/`, with its guest entry points replaced by the `gl_hle.h` API. `src/games/otogi2/d3d.cpp` intercepts the game's D3D and calls it. ANGLE is the Sneak King release build of commit feebf60, downloaded by `cmake/angle.cmake` and checked against its SHA-256.
+- D3D8LTCG passes some arguments in registers. Each convention was read from the prologue and `ret` of the function (`analysis` script: bytes popped, registers read before written), then checked against the XbSymbolDatabase name:
+
+| Function | Address | Arguments |
+|---|---|---|
+| Swap | `0x001DC950` | eax = Flags |
+| Clear | `0x001DE200` | 6 on the stack |
+| SetRenderTarget | `0x001DE900` | 2 on the stack |
+| CopyRects | `0x001DEC00` | 5 on the stack |
+| SetTransform | `0x001DEF30` | eax = State, edx = pMatrix |
+| SetViewport | `0x001DF040` | 1 on the stack |
+| SetTexture | `0x001DF260` | 2 on the stack |
+| SetIndices | `0x001DF420` | ebx = pIndexData, BaseVertexIndex on the stack |
+| SetStreamSource | `0x001DFCE0` | 3 on the stack |
+| CreateVertexShader | `0x001E0370` | 4 on the stack |
+| SetVertexShader | `0x001E05E0` | 1 on the stack |
+| SetVertexShaderConstant1 / 4 | `0x001E0750` / `0x001E07B0` | ecx = Register, edx = pConstantData |
+| SetVertexShaderConstantNotInlineFast | `0x001E0860` | ecx, edx, dword count on the stack |
+| SetPixelShader | `0x001E09F0` | eax = Handle |
+| DrawVerticesUP | `0x001E0F50` | 4 on the stack |
+| DrawVertices | `0x001E1100` | PrimitiveType on the stack, ecx = StartVertex, eax = VertexCount |
+| DrawIndexedVertices | `0x001E11D0` | 3 on the stack |
+
+- The device layout matches the renderer's: render target at `device+0x1A04`, depth at `+0x1A08` (what the game's Clear reads), back buffer at `+0x1A14`.
+- The host opens its own window (`src/host/window.cpp`). The toolkit's framebuffer window would need two functions only the Sneak King recomp's patched toolkit has.
+- First run: ANGLE on Direct3D 11, 640x480 targets rendered at 2x, about 40 presents a second, no crash. The frames are black: the hooked draws see 0 to 25 calls a second. The logos and menus are drawn another way, most likely D3D's immediate mode (`Begin`, vertices written inline into the pushbuffer, `D3DDevice_End` at `0x001E1510`), which LTCG inlines into the callers. The first game decodes its equivalent (`BeginPush`/`EndPush`) from the pushbuffer.
+- Frame dumps: `RECOMP_D3D9_DUMP=<prefix>`, `RECOMP_D3D9_DUMP_EVERY=<frames>` (BMP); `RECOMP_D3D9_STATS=1` prints presents, draws, texture creations and program compilations each second.
+
 ## Comparison with the first game
 
 The first *Otogi* (USA, title ID `0x46530002`) runs natively in [Otogi XUnchain](https://github.com/Guuzzeji/otogi-xunchain). Both XBEs were analysed the same way and compared with `scripts/xbe_compare.py`, which matches functions on their instructions with addresses masked, then along the call graph from the pairs already found.

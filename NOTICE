@@ -7,7 +7,17 @@ project. It does not cover:
 - xboxrecomp/: the xboxrecomp toolkit, a git submodule under its own license
   (xboxrecomp/LICENSE and xboxrecomp/LICENSES/).
 - Code adapted from other projects, which keeps its original notice where it
-  appears.
+  appears:
+  - src/render/gl_hle.c and src/render/d3d_hle_shared.h are adapted from the
+    Sneak King recomp (https://github.com/Guuzzeji/sneaky-whopper-recomp),
+    MIT License, Copyright (c) 2026 The Sneak King recomp contributors.
+  - Fixes ported from Otogi XUnchain
+    (https://github.com/Guuzzeji/otogi-xunchain), MIT License,
+    Copyright (c) 2026 The Otogi XUnchain contributors, are marked where they
+    appear.
+- ANGLE (https://chromium.googlesource.com/angle/angle), BSD 3-Clause
+  License, downloaded at build time (cmake/angle.cmake) and not part of this
+  repository.
 - The game. Otogi 2: Immortal Warriors, its code and its data belong to
   FromSoftware, Inc. This repository contains none of them, and nothing
   generated from them (lifted code, disassembly, extracted assets).

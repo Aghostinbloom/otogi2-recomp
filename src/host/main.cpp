@@ -1,6 +1,8 @@
 #include "games/otogi2/profile.hpp"
 #include "host/crash.hpp"
 #include "host/runtime.hpp"
+#include "host/window.hpp"
+#include "render/gl_hle.h"
 
 #include <shlobj.h>
 
@@ -80,6 +82,8 @@ int main(int argc, char **argv) {
 
     apply_runtime_defaults();
     otogi::install_crash_handler();
+    gl_hle_init();
+    otogi::start_window(kProfile.name);
 
     // The runtime keeps pointers into the image, so it lives until exit.
     static auto xbe = read_file(game / "default.xbe");

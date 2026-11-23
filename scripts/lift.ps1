@@ -23,7 +23,11 @@ $disasm = Join-Path $out "disasm"
 $funcId = Join-Path $out "func_id"
 $abi = Join-Path $out "abi"
 $gen = Join-Path $root "src\recomp\gen"
-$overrides = Join-Path $root "src\games\otogi2\overrides.cpp"
+
+# --exclude-manual reads one file: every hand-written function of the game.
+New-Item -ItemType Directory -Force $out | Out-Null
+$overrides = Join-Path $out "manual_scan.cpp"
+Get-ChildItem (Join-Path $root "src\games\otogi2") -Filter *.cpp | Get-Content | Set-Content $overrides
 
 function Step([string]$name, [string[]]$arguments) {
     Write-Host "== $name"

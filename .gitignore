@@ -12,6 +12,7 @@
 !/CHANGELOG.md
 !/CONTRIBUTING.md
 !/CMakeLists.txt
+!/cmake/
 !/src/
 !/docs/
 !/scripts/

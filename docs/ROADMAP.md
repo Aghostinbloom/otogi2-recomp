@@ -23,9 +23,11 @@ Port the boot fixes through the Otogi 2 profile: DVD media check, asynchronous r
 
 Done: D3D fences, vblank, audio readiness, asynchronous reads, heap reclaim, XAPI input, the movie step (movies are skipped until M4). The title reaches the main menu and loads `map\m200`. The DVD media check has not come up. Open: getting from the main menu into a stage without seeing the screen.
 
-## M3: Renderer
+## M3: Renderer (in progress)
 
 D3D8 interception on OpenGL ES 3: state mirroring, draws, register combiners, render targets, recorded pushbuffers. Exit: menus and the first stage draw correctly.
+
+Done: the renderer, ANGLE and the window are in place, and the game's D3D calls reach it. Next: the immediate-mode 2D (logos, menus, text) written inline into the pushbuffer, then NV2A register-combiner pixel shaders.
 
 ## M4: Playable
 

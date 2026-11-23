@@ -2,7 +2,7 @@
 
 A native Windows port of *Otogi 2: Immortal Warriors* (FromSoftware, 2004, original Xbox), made by static recompilation. The game's `default.xbe` is translated from x86 to C function by function and compiled for the PC, with a small model of the Xbox around it. No emulator.
 
-> **Status: pre-alpha.** The whole game lifts to C and runs natively through its logos, title screen and into the main menu, driven by a scripted pad. Nothing is drawn yet. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: pre-alpha.** The whole game lifts to C and runs natively through its logos, title screen and into the main menu, driven by a scripted pad. It opens a window and its D3D reaches the renderer, but the picture is still black. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 **This repository contains no game code or data.** You build the game from a dump of your own disc. Nothing from the disc, and nothing generated from it (lifted C, disassembly, extracted assets), is ever committed; a check enforces it on every push.
 
@@ -26,6 +26,7 @@ A native Windows port of *Otogi 2: Immortal Warriors* (FromSoftware, 2004, origi
 - Windows 10 or 11, 64-bit
 - A disc image of your own **Otogi 2: Immortal Warriors, USA** disc
 - Visual Studio 2022 Build Tools (MSVC, CMake, Ninja), LLVM (clang-cl), Python 3.10+ with `capstone`
+- An internet connection for the first build, which downloads ANGLE (6.7 MB, checked against its SHA-256)
 
 ## Building from source
 
@@ -52,6 +53,8 @@ Pull requests are not accepted at the moment. Bug reports and findings are welco
 - [Otogi XUnchain](https://github.com/Guuzzeji/otogi-xunchain), the recomp of the first *Otogi*: the reference for this engine's boot, rendering and input fixes.
 - [Sneak King recomp](https://github.com/Guuzzeji/sneaky-whopper-recomp): the D3D8-to-OpenGL ES layer this port builds on.
 - [extract-xiso](https://github.com/XboxDev/extract-xiso): disc image extraction.
+- [XbSymbolDatabase](https://github.com/Cxbx-Reloaded/XbSymbolDatabase): the names of the game's XDK functions and globals.
+- [ANGLE](https://chromium.googlesource.com/angle/angle): OpenGL ES on Direct3D 11, Vulkan or OpenGL.
 
 ## License
 
