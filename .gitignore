@@ -1,0 +1,43 @@
+# Allowlist: everything is ignored unless listed here. The working folder also
+# holds the disc image, the extracted game, analysis output and other clones;
+# none of it belongs in this repository.
+/*
+!/.gitignore
+!/.gitattributes
+!/.gitmodules
+!/.github/
+!/README.md
+!/LICENSE
+!/CHANGELOG.md
+!/CONTRIBUTING.md
+!/docs/
+!/scripts/
+!/xboxrecomp
+
+# Game content, never committed, even inside allowed folders.
+*.iso
+*.xiso
+*.xbe
+*.xmv
+*.dds
+*.tga
+*.dat
+*.xps
+*.otr
+*.mdl
+*.msg
+*.smd
+*.ccm
+*.m2a
+*.prm
+*.bnd
+*.dev
+*.bin
+*.000
+*.001
+
+# Build and tool output
+build/
+__pycache__/
+*.pyc
+*.log
