@@ -7,7 +7,8 @@
 #define XB_STREAMS           0x001EF1C8u   /* D3D_g_Stream[16] */
 #define XB_DEVICE_PTR        0x001EE1F8u   /* D3D_g_pDevice */
 
-/* Device fields, as Clear and Swap read them. */
+/* Device fields, as Clear, Swap and BeginPush read them. */
+#define XB_DEV_PUSH_PUT      0x0000u       /* where the CPU writes the next method */
 #define XB_DEV_RENDER_TARGET 0x1A04u
 #define XB_DEV_DEPTH_STENCIL 0x1A08u
 #define XB_DEV_BACK_BUFFER   0x1A14u

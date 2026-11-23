@@ -2,7 +2,7 @@
 
 A native Windows port of *Otogi 2: Immortal Warriors* (FromSoftware, 2004, original Xbox), made by static recompilation. The game's `default.xbe` is translated from x86 to C function by function and compiled for the PC, with a small model of the Xbox around it. No emulator.
 
-> **Status: pre-alpha.** The whole game lifts to C and runs natively through its logos, title screen and into the main menu, driven by a scripted pad. It opens a window and its D3D reaches the renderer, but the picture is still black. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: pre-alpha.** The whole game lifts to C and runs natively in its own window: the logos and menus draw, through the main menu and into the settings, driven by a scripted pad. Text still shows black boxes, and stages are not reached yet. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 **This repository contains no game code or data.** You build the game from a dump of your own disc. Nothing from the disc, and nothing generated from it (lifted C, disassembly, extracted assets), is ever committed; a check enforces it on every push.
 
@@ -41,7 +41,7 @@ powershell -File scripts\build.ps1
 build\otogi2.exe game
 ```
 
-`scripts/lift.ps1` translates the game to C (about a minute); `scripts/build.ps1` finds Visual Studio's x64 environment and builds with clang-cl and Ninja (`-Compiler cl` uses MSVC instead). For now the game shows no window: run it from a console to follow its log. `RECOMP_KEYBOARD=1` makes the keyboard a pad, and `RECOMP_PAD_SCRIPT` drives one from a timeline (see `xboxrecomp/src/usb/usb_gamepad.c`). `scripts/xbe_compare.py` compares two analysed XBEs and maps functions from one to the other; it is how the first game's fixes are located in this one.
+`scripts/lift.ps1` translates the game to C (about a minute); `scripts/build.ps1` finds Visual Studio's x64 environment and builds with clang-cl and Ninja (`-Compiler cl` uses MSVC instead). Run it from a console to follow its log. `RECOMP_KEYBOARD=1` makes the keyboard a pad, and `RECOMP_PAD_SCRIPT` drives one from a timeline (see `xboxrecomp/src/usb/usb_gamepad.c`). `scripts/xbe_compare.py` compares two analysed XBEs and maps functions from one to the other; it is how the first game's fixes are located in this one.
 
 ## Contributing
 

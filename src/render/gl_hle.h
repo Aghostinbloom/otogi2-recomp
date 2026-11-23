@@ -39,6 +39,12 @@ void gl_hle_set_pixel_shader(uint32_t handle);
 void gl_hle_create_vertex_shader(uint32_t declaration, uint32_t function, uint32_t handle_ptr);
 void gl_hle_set_vertex_shader_constants(int32_t first_register, uint32_t data, uint32_t count);
 
+/* Draw what the title wrote into the pushbuffer itself since the last flush
+ * (SET_BEGIN_END and INLINE_ARRAY). Call before anything changes state, and
+ * restart after the guest's pushbuffer wraps. */
+void gl_hle_pushbuffer_flush(void);
+void gl_hle_pushbuffer_restart(void);
+
 void gl_hle_draw_vertices_up(uint32_t primitive, uint32_t vertex_count, uint32_t data, uint32_t stride);
 void gl_hle_draw_indexed_vertices_up(uint32_t primitive, uint32_t vertex_count, uint32_t indices,
                                      uint32_t data, uint32_t stride);

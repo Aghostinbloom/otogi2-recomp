@@ -358,6 +358,10 @@ static void rt_fill(HostRt *r, const Rect *rects, uint32_t n, uint32_t argb)
 /* Viewport as the title last set it (1x pixels). */
 static struct { uint32_t x, y, w, h; float minz, maxz; } s_vp = { 0, 0, 640, 480, 0.0f, 1.0f };
 
+/* The viewport clipped to the render target, as D3D does: titles pass
+ * 0x7FFFFFFF for "the whole target". */
+static uint32_t s_vp_cw = 1, s_vp_ch = 1;
+
 static void bind_targets(void)
 {
     uint32_t dev = xb_device();
@@ -380,6 +384,8 @@ static void bind_targets(void)
         if (s_vp.x + w > c->w) w = c->w > s_vp.x ? c->w - s_vp.x : 0;
         if (s_vp.y + h > c->h) h = c->h > s_vp.y ? c->h - s_vp.y : 0;
     }
+    s_vp_cw = w ? w : 1;
+    s_vp_ch = h ? h : 1;
     glViewport((GLint)(s_vp.x * s_scale), (GLint)(s_vp.y * s_scale), (GLsizei)(w * s_scale), (GLsizei)(h * s_scale));
     glDepthRangef(s_vp.minz, s_vp.maxz);
 }
@@ -1312,7 +1318,7 @@ static void upload_uniforms(const Prog *p)
         glUniform4fv(p->u_lspot, 8, lspot);
     }
     if (p->u_rhw >= 0) {
-        t[0] = (float)s_vp.x; t[1] = (float)s_vp.y; t[2] = (float)(s_vp.w ? s_vp.w : 1); t[3] = (float)(s_vp.h ? s_vp.h : 1);
+        t[0] = (float)s_vp.x; t[1] = (float)s_vp.y; t[2] = (float)s_vp_cw; t[3] = (float)s_vp_ch;
         glUniform4fv(p->u_rhw, 1, t);
     }
     if (p->u_fog >= 0) {
@@ -1546,6 +1552,25 @@ static void draw(uint32_t xprim, uint32_t n, const uint16_t *idx,
 
     if (!n || !prepare_draw(&vs))
         return;
+    {
+        /* RECOMP_GL_DRAWLOG=<n>: the first n draws, for bring-up. */
+        static long left = -1;
+        if (left < 0) {
+            const char *e = getenv("RECOMP_GL_DRAWLOG");
+            left = e ? atol(e) : 0;
+        }
+        if (left > 0) {
+            const float *v = (const float *)(up ? up : NULL);
+            left--;
+            fprintf(stderr, "[GL] draw prim %u n %u %s vs %08X stride %u rt %p vp %ux%u+%u+%u z %.2f-%.2f",
+                    xprim, n, idx ? "indexed" : up ? "up" : "stream", s_vshader,
+                    up ? up_stride : s_stream_stride[0], (void *)s_cur_rt, s_vp.w, s_vp.h, s_vp.x, s_vp.y,
+                    s_vp.minz, s_vp.maxz);
+            if (v)
+                fprintf(stderr, " v0 %.1f %.1f %.3f %.3f", v[0], v[1], v[2], v[3]);
+            fprintf(stderr, "\n");
+        }
+    }
     if (idx) {
         lo = 0xFFFF; hi = 0;
         for (i = 0; i < n; i++) {
@@ -1731,6 +1756,90 @@ static void present(uint32_t data)
     }
     glBindFramebuffer(GL_FRAMEBUFFER, s_fbo);
     memset(&s_st, 0, sizeof s_st);
+}
+
+/* -- Inline pushbuffer draws ---------------------------------------------------- */
+
+/* Titles built with D3D8LTCG write some primitives into the pushbuffer
+ * themselves: SET_BEGIN_END(prim), INLINE_ARRAY vertices in the current vertex
+ * format, SET_BEGIN_END(0). Everything written since the last flush is
+ * decoded; other methods are state the mirrored globals already carry. A flush
+ * happens before any intercepted D3D call changes state. */
+
+static uint32_t s_pb_last;
+static uint32_t s_pb_prim;
+static uint8_t *s_pb_verts;
+static uint32_t s_pb_len, s_pb_cap;
+
+static void pb_append(const uint8_t *p, uint32_t n)
+{
+    if (s_pb_len + n > s_pb_cap) {
+        uint32_t cap = s_pb_cap ? s_pb_cap * 2 : 4096;
+        uint8_t *v;
+        while (cap < s_pb_len + n) cap *= 2;
+        v = (uint8_t *)realloc(s_pb_verts, cap);
+        if (!v) return;
+        s_pb_verts = v;
+        s_pb_cap = cap;
+    }
+    memcpy(s_pb_verts + s_pb_len, p, n);
+    s_pb_len += n;
+}
+
+static void pb_decode(uint32_t p, uint32_t end)
+{
+    while (p + 4 <= end) {
+        uint32_t h = MEM32(p), count = (h >> 18) & 0x7FF, method = h & 0x1FFC;
+        p += 4;
+        if (h == 0)
+            continue;
+        if ((h & 0xE0030003) && !(h & 0x40000000))
+            return;                             /* jump or call: the ring moved */
+        if (p + count * 4 > end)
+            return;
+        if (method == 0x17FC && count) {        /* SET_BEGIN_END */
+            uint32_t prim = MEM32(p);
+            if (prim == 0 && s_pb_prim && s_pb_len) {
+                uint32_t stride = fvf_stride(s_vshader);
+                if (stride && s_pb_len % stride == 0)
+                    draw(s_pb_prim, s_pb_len / stride, NULL, s_pb_verts, stride, 0);
+                else {
+                    static int said;
+                    if (said++ < 4)
+                        fprintf(stderr, "[GL] inline draw skipped: %u bytes, vertex shader %08X stride %u\n",
+                                s_pb_len, s_vshader, stride);
+                }
+            }
+            s_pb_prim = prim;
+            s_pb_len = 0;
+        } else if (method == 0x1818 && s_pb_prim) { /* INLINE_ARRAY */
+            pb_append((const uint8_t *)gp(p), count * 4);
+        }
+        p += count * 4;
+    }
+}
+
+void gl_hle_pushbuffer_flush(void)
+{
+    uint32_t dev = xb_device(), cur;
+    if (!dev)
+        return;
+    cur = MEM32(dev + XB_DEV_PUSH_PUT);
+    if (s_pb_last && cur > s_pb_last && cur - s_pb_last < 0x400000) {
+        lock();
+        if (dev_ready())
+            pb_decode(s_pb_last, cur);
+        unlock();
+    }
+    s_pb_last = cur;
+}
+
+void gl_hle_pushbuffer_restart(void)
+{
+    uint32_t dev = xb_device();
+    s_pb_last = dev ? MEM32(dev + XB_DEV_PUSH_PUT) : 0;
+    s_pb_prim = 0;
+    s_pb_len = 0;
 }
 
 /* -- API (gl_hle.h) ------------------------------------------------------------ */

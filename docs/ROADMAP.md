@@ -27,7 +27,7 @@ Done: D3D fences, vblank, audio readiness, asynchronous reads, heap reclaim, XAP
 
 D3D8 interception on OpenGL ES 3: state mirroring, draws, register combiners, render targets, recorded pushbuffers. Exit: menus and the first stage draw correctly.
 
-Done: the renderer, ANGLE and the window are in place, and the game's D3D calls reach it. Next: the immediate-mode 2D (logos, menus, text) written inline into the pushbuffer, then NV2A register-combiner pixel shaders.
+Done: the renderer, ANGLE and the window; the game's D3D calls and the 2D it writes into the pushbuffer itself reach it; logos and menus draw. Next: NV2A register-combiner pixel shaders (text and icons have black boxes), then the 3D stages.
 
 ## M4: Playable
 
