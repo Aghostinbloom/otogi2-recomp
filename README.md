@@ -55,7 +55,7 @@ Pull requests are not accepted at the moment. Bug reports and findings are welco
 
 ## License
 
-The project's own code and docs are under the [MIT License](LICENSE). The `xboxrecomp/` submodule and other third-party components keep their own licenses.
+The project's own code and docs are under the [MIT License](LICENSE). The `xboxrecomp/` submodule and other third-party components keep their own licenses, and the game is not covered; see [NOTICE](NOTICE).
 
 ---
 

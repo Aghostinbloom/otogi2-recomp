@@ -19,16 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This license covers the code and documentation written for this project. It
-does not cover:
-
-- xboxrecomp/: the xboxrecomp toolkit, a git submodule under its own license
-  (xboxrecomp/LICENSE and xboxrecomp/LICENSES/).
-- Code adapted from other projects, which keeps its original notice where it
-  appears.
-- The game. Otogi 2: Immortal Warriors, its code and its data belong to
-  FromSoftware, Inc. This repository contains none of them, and nothing
-  generated from them (lifted code, disassembly, extracted assets).
