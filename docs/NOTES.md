@@ -43,12 +43,19 @@ How things work and what was found, one section per area. Addresses are guest vi
   - `cli`/`sti` at `0x00165AB5`: harmless as no-ops.
 - Build: `scripts\build.ps1` (clang-cl 23, Ninja, RelWithDebInfo with embedded debug info). The whole tree, toolkit included, builds in about 30 s; the exe is 55 MB. The toolkit builds under clang-cl with no patches.
 
-## First boot
+## Boot (M2)
 
-`build\otogi2.exe <game folder>` with no overrides (`RECOMP_WATCHDOG_SECS=10`):
-- The XBE maps (12 sections, 113/113 thunks bridged), the main thread starts, the CRT initialises, and the save partition mounts (`TDATA`/`UDATA\46530004`).
-- About 200 kernel calls, all successful. D3D initialisation starts: 7.7 MB of contiguous memory (pushbuffer), GPU interrupt connected (vector 3, routine `0x001E7C00`).
-- Then it hangs in D3D: the last indirect calls are in `0x001DCB30`-`0x001DD300` and the NV2A pushbuffer is idle (`PUT == GET`). This is where the first game needed its D3D fence fix (`D3D_BlockOnTime`) and the pushbuffer kick override.
+- `scripts\lift.ps1` runs the whole pipeline; `-RecompOnly` re-runs only the lifter after the overrides change. Overrides live in `src/games/otogi2/overrides.cpp`, which `--exclude-manual` reads directly: a line starting `void sub_X(void)` is a replacement, `extern void sub_X_gen(void);` a wrapper.
+- Runtime options on by default (`kOtogi2RuntimeDefaults`; the environment still wins): `RECOMP_ASYNC_IO`, `RECOMP_VBLANK`, `RECOMP_AC97_READY`, `RECOMP_HEAP_RECLAIM`, as in the first game.
+- Fixes, in boot order:
+  1. Without overrides the title hangs in D3D initialisation, in `sub_001E18E0` (`D3D_BlockOnTime`, loop at `0x001E1A50`): it waits for the GPU semaphore `*(device+0x30)` to reach the fence `device+0x2C`, and nothing executes the pushbuffer. Replaced: the semaphore points at the fence counter, so every fence reads as done. Device pointer `0x001EE1F8`. Same fix as the first game.
+  2. The intro movie (`movie\OTOGI_h_loop_us.xmv`) then waits in DirectSound forever: the XMV clock only starts once its audio pipeline runs. `sub_00135AB0` is the per-frame movie step (plain `ret`, 1 = ended), called only by `sub_0013F570` (play a movie, skippable by any button; `sub_00135710` opens, `sub_00135DF0` closes). Wrapped: every movie ends at once unless `RECOMP_MOVIES=1`.
+  3. With movies ending at once, the attract loop opens the movie every few hundred milliseconds, and each one allocates 1.8 MB of contiguous memory (640x480 YUY2 and ARGB). The title frees it on close, but the runtime only reuses freed contiguous memory under `RECOMP_HEAP_RECLAIM`; without it the 64 MB window was full in 20 s. Now stable at about 25 MB.
+  4. Input: XAPI's USB stack never enumerates a device on the runtime's OHCI model (`RECOMP_USB=1`, which needs the host to call `xbox_OhciInit`: interrupts arrive, no control transfer follows). The eight XAPI entry points are replaced and answered from `usb_gamepad_report` (host XInput pad, keyboard, `RECOMP_PAD_SCRIPT`), as in the first game: XInitDevices `0x001F0704`, XGetDevices `0x001F0709`, XGetDeviceChanges `0x001F072B`, XInputOpen `0x001F0402`, XInputClose `0x001F0458`, XInputGetCapabilities `0x001F0464`, XInputGetState `0x001F063C`, XInputSetState `0x001F06AF`.
+- `sub_001E1D80` is the PFB flush wait (sets `0x100410` bit 16 and spins until it clears); the runtime's ack thread clears it, so it costs time rather than hanging.
+- Startup order seen in the file log: FromSoftware logo, title screen (`menu\fe_ti*`), Sega logo, menu music (`sound\jpn\stream_menu`), attract movie. Probed and missing on the disc, harmlessly: `z:\OTOGI-HTE9 MAP 01..30` (cache partition, first run), `sfx\sNNN.dds`.
+- With `RECOMP_PAD_SCRIPT` pressing Start every 0.7 s, the title opens the main menu (`menu\bin\mainmenu_locz.med`, `menu\fe_me*`, `menu\fe_bg*`) and loads `map\m200\` and `menu\m000prm.dat` about 3 s into the script, before any A press; most likely the menu's 3D background rather than a stage. 74 further presses load nothing else. No crash or untranslated instruction in 85 s.
+- XPP's USB code reaches `cli`/`sti` at `0x001F456B`/`0x001F457C` when the OHCI model is on; harmless as no-ops.
 
 ## Comparison with the first game
 

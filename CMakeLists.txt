@@ -23,6 +23,7 @@ add_executable(otogi2
     src/host/main.cpp
     src/host/crash.cpp
     src/host/manual.cpp
+    src/games/otogi2/overrides.cpp
     ${OTOGI2_GEN_SOURCES}
 )
 

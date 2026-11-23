@@ -13,14 +13,16 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 
-$vsRoots = @("${env:ProgramFiles}\Microsoft Visual Studio", "${env:ProgramFiles(x86)}\Microsoft Visual Studio")
-$vcvars = Get-ChildItem $vsRoots -Filter vcvarsall.bat -Recurse -Depth 6 -ErrorAction SilentlyContinue |
-    Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
-if (-not $vcvars) { throw "vcvarsall.bat not found: install Visual Studio 2022 Build Tools with the C++ workload." }
-
-# Import the x64 developer environment into this session.
-cmd /c "`"$vcvars`" x64 >nul && set" | ForEach-Object {
-    if ($_ -match "^([^=]+)=(.*)$") { Set-Item -Path "env:$($Matches[1])" -Value $Matches[2] }
+# Import the x64 developer environment into this session, once: importing it
+# again keeps growing PATH until cmd rejects the line.
+if ($env:VSCMD_ARG_TGT_ARCH -ne "x64") {
+    $vsRoots = @("${env:ProgramFiles}\Microsoft Visual Studio", "${env:ProgramFiles(x86)}\Microsoft Visual Studio")
+    $vcvars = Get-ChildItem $vsRoots -Filter vcvarsall.bat -Recurse -Depth 6 -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+    if (-not $vcvars) { throw "vcvarsall.bat not found: install Visual Studio 2022 Build Tools with the C++ workload." }
+    cmd /c "`"$vcvars`" x64 >nul && set" | ForEach-Object {
+        if ($_ -match "^([^=]+)=(.*)$") { Set-Item -Path "env:$($Matches[1])" -Value $Matches[2] }
+    }
 }
 
 if ($Compiler -eq "clang-cl" -and -not (Get-Command clang-cl -ErrorAction SilentlyContinue)) {

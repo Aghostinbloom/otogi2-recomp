@@ -56,6 +56,13 @@ fs::path save_dir() {
     return dir;
 }
 
+void apply_runtime_defaults() {
+    for (const auto &d : kProfile.runtime_defaults) {
+        if (!std::getenv(d.name))
+            _putenv_s(d.name, d.value);
+    }
+}
+
 int fail(const char *message) {
     std::fprintf(stderr, "error: %s\n", message);
     return 1;
@@ -71,6 +78,7 @@ int main(int argc, char **argv) {
     std::printf("%.*s\ngame folder: %s\n", static_cast<int>(kProfile.name.size()), kProfile.name.data(),
                 game.string().c_str());
 
+    apply_runtime_defaults();
     otogi::install_crash_handler();
 
     // The runtime keeps pointers into the image, so it lives until exit.
@@ -86,6 +94,7 @@ int main(int argc, char **argv) {
 
     if (std::getenv("RECOMP_AC97_READY"))
         g_apu_state = mcpx_apu_init_standalone(static_cast<uint8_t *>(xbox_GetMemoryBase()));
+    xbox_OhciInit();  // inert unless RECOMP_USB is set
 
     xbox_kernel_init();
     xbox_path_init(game.string().c_str(), save_dir().string().c_str());

@@ -17,9 +17,11 @@ Toolchain, extraction, XBE analysis, kernel coverage, comparison with the first 
 
 `func_id`, `abi_analysis` and `recomp --all` over Otogi 2; the generated C compiles and links against the toolkit with a stub host. Untranslated instructions are classified by the function that contains them. Exit: the exe links. It also boots as far as D3D initialisation.
 
-## M2: Boot
+## M2: Boot (in progress)
 
 Port the boot fixes through the Otogi 2 profile: DVD media check, asynchronous reads, D3D fences, vblank, XAPI input, the movie step, audio readiness. Exit: the title reaches the first stage under a scripted pad, with no crash for a minute.
+
+Done: D3D fences, vblank, audio readiness, asynchronous reads, heap reclaim, XAPI input, the movie step (movies are skipped until M4). The title reaches the main menu and loads `map\m200`. The DVD media check has not come up. Open: getting from the main menu into a stage without seeing the screen.
 
 ## M3: Renderer
 

@@ -13,3 +13,5 @@ All notable changes to this project are listed here. The format follows
 - A check that no game file or personal detail is ever committed (`scripts/check_no_game_data.py`, run on every push).
 - The first native build: the whole game lifts to C and links into `otogi2.exe` (C++20 host, CMake, clang-cl), which boots as far as Direct3D initialisation.
 - `scripts/build.ps1`: one-command build from a Visual Studio x64 environment.
+- `scripts/lift.ps1`: the whole lift pipeline in one command.
+- Boots through the logos and title screen into the main menu: D3D fence and XMV movie overrides, XAPI pad input from the host pad, keyboard or a scripted pad, and the runtime options the game needs on by default. Movies are skipped for now.
