@@ -29,6 +29,27 @@ How things work and what was found, one section per area. Addresses are guest vi
 - `tools.disasm`, every code section (no `--text-only`: the XDK sections are code the game calls): 7,939 functions. `.text` 6,471, DSOUND 510, D3DX 428, D3D 225, XPP 197, XMV 72, XGRPH 36. `DOLBY` has no x86 functions; it is most likely the audio DSP's image.
 - Most called kernel imports: `RtlLeaveCriticalSection` (139 call sites), `KfLowerIrql`, `NtClose`, `KeRaiseIrqlToDpcLevel`, `KeCancelTimer`.
 
+## Lift (M1)
+
+- Pipeline, from `xboxrecomp/` with `..\.venv\Scripts\python -m tools.<step>`, outputs under `analysis/otogi2/`:
+  `func_id ..\input\default.xbe --functions <disasm>\functions.json --strings <disasm>\strings.json --xrefs <disasm>\xrefs.json -o <func_id>`,
+  `abi_analysis ..\input\default.xbe --disasm-dir <disasm> --func-id-dir <func_id> --output-dir <abi>`,
+  `recomp ..\input\default.xbe --all --split 250 --game-name "Otogi 2" --gen-dir ..\src\recomp\gen --disasm-dir <disasm> --func-id-dir <func_id> --abi-dir <abi>`.
+- func_id: 9,532 entries (the disassembler's 7,939 plus vtable slots); 4,609 classified, 1,791 of them vtable methods. abi_analysis: 7,939 entries, 533 thiscall.
+- recomp: 7,943/7,943 translated, 0 failed, about 1.08 million lines in 32 files (45 MB), 13 s.
+- 11 untranslated instructions (7 mnemonics), each emitted as `recomp_unimpl()` so a hit is logged:
+  - `sgdt` at `0x0016846C` and a far jump at `0x0016847D`: the GDT write that the first game overrides (`sub_000E88E4` there). Needs an override in M2 if reached.
+  - `aaa`/`aas`/`daa` around `0x001A8C95`, in XMV: most likely data lifted as code.
+  - `cli`/`sti` at `0x00165AB5`: harmless as no-ops.
+- Build: `scripts\build.ps1` (clang-cl 23, Ninja, RelWithDebInfo with embedded debug info). The whole tree, toolkit included, builds in about 30 s; the exe is 55 MB. The toolkit builds under clang-cl with no patches.
+
+## First boot
+
+`build\otogi2.exe <game folder>` with no overrides (`RECOMP_WATCHDOG_SECS=10`):
+- The XBE maps (12 sections, 113/113 thunks bridged), the main thread starts, the CRT initialises, and the save partition mounts (`TDATA`/`UDATA\46530004`).
+- About 200 kernel calls, all successful. D3D initialisation starts: 7.7 MB of contiguous memory (pushbuffer), GPU interrupt connected (vector 3, routine `0x001E7C00`).
+- Then it hangs in D3D: the last indirect calls are in `0x001DCB30`-`0x001DD300` and the NV2A pushbuffer is idle (`PUT == GET`). This is where the first game needed its D3D fence fix (`D3D_BlockOnTime`) and the pushbuffer kick override.
+
 ## Comparison with the first game
 
 The first *Otogi* (USA, title ID `0x46530002`) runs natively in [Otogi XUnchain](https://github.com/Guuzzeji/otogi-xunchain). Both XBEs were analysed the same way and compared with `scripts/xbe_compare.py`, which matches functions on their instructions with addresses masked, then along the call graph from the pairs already found.

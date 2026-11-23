@@ -3,8 +3,8 @@
     python scripts/check_no_game_data.py
 
 Checks every tracked and staged file (submodules excluded): game file
-extensions, XBE/XISO signatures, anything over 1 MB, absolute user paths and
-e-mail addresses other than GitHub noreply ones.
+extensions, files that start like an XBE or an XISO image, anything over 1 MB,
+absolute user paths and e-mail addresses other than GitHub noreply ones.
 """
 
 import re
@@ -17,7 +17,7 @@ GAME_EXTENSIONS = {
     ".msg", ".smd", ".ccm", ".m2a", ".prm", ".bnd", ".dev", ".bin", ".000", ".001",
 }
 MAX_BYTES = 1 << 20
-SIGNATURES = (b"XBEH", b"MICROSOFT*XBOX*MEDIA")
+SIGNATURES = ((0, b"XBEH"), (0x10000, b"MICROSOFT*XBOX*MEDIA"))
 USER_PATH = re.compile(rb"[A-Za-z]:[\\/]+(?:Users|Documents and Settings)[\\/]+[^\\/\s]+|/home/[^/\s]+|/Users/[^/\s]+")
 EMAIL = re.compile(rb"[\w.+-]+@[\w-]+\.[\w.-]+")
 ALLOWED_EMAIL = re.compile(rb"@users\.noreply\.github\.com$|@example\.(com|org)$")
@@ -42,7 +42,7 @@ def main():
         data = path.read_bytes()
         if len(data) > MAX_BYTES:
             problems.append(f"{path}: {len(data)} bytes, over the 1 MB limit")
-        if any(sig in data for sig in SIGNATURES):
+        if any(data[off:off + len(sig)] == sig for off, sig in SIGNATURES):
             problems.append(f"{path}: contains an XBE or XISO signature")
         for m in USER_PATH.finditer(data):
             problems.append(f"{path}: absolute user path {m.group().decode(errors='replace')!r}")

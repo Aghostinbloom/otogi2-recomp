@@ -13,9 +13,9 @@ One milestone at a time. Each ends with an exit check that a person can run.
 
 Toolchain, extraction, XBE analysis, kernel coverage, comparison with the first game. Exit: [NOTES.md](NOTES.md) documents the XBE, and the first game's fixes are located or listed as open.
 
-## M1: Lift
+## M1: Lift (done)
 
-`func_id`, `abi_analysis` and `recomp --all` over Otogi 2; the generated C compiles and links against the toolkit with a stub host. Untranslated instructions are classified by the function that contains them. Exit: the exe links.
+`func_id`, `abi_analysis` and `recomp --all` over Otogi 2; the generated C compiles and links against the toolkit with a stub host. Untranslated instructions are classified by the function that contains them. Exit: the exe links. It also boots as far as D3D initialisation.
 
 ## M2: Boot
 

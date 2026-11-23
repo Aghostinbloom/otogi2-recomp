@@ -11,6 +11,8 @@
 !/NOTICE
 !/CHANGELOG.md
 !/CONTRIBUTING.md
+!/CMakeLists.txt
+!/src/
 !/docs/
 !/scripts/
 !/xboxrecomp
@@ -36,6 +38,9 @@
 *.bin
 *.000
 *.001
+
+# Lifted code is generated from the game
+/src/recomp/gen/
 
 # Build and tool output
 build/

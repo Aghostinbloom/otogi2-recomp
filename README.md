@@ -2,7 +2,7 @@
 
 A native Windows port of *Otogi 2: Immortal Warriors* (FromSoftware, 2004, original Xbox), made by static recompilation. The game's `default.xbe` is translated from x86 to C function by function and compiled for the PC, with a small model of the Xbox around it. No emulator.
 
-> **Status: pre-alpha.** The executable has been analysed and compared with the first game; nothing boots yet. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: pre-alpha.** The whole game lifts to C and links into a native exe, which boots as far as Direct3D initialisation. Nothing is drawn yet. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 **This repository contains no game code or data.** You build the game from a dump of your own disc. Nothing from the disc, and nothing generated from it (lifted C, disassembly, extracted assets), is ever committed; a check enforces it on every push.
 
@@ -27,20 +27,24 @@ A native Windows port of *Otogi 2: Immortal Warriors* (FromSoftware, 2004, origi
 - A disc image of your own **Otogi 2: Immortal Warriors, USA** disc
 - Visual Studio 2022 Build Tools (MSVC, CMake, Ninja), LLVM (clang-cl), Python 3.10+ with `capstone`
 
-## Analysis
+## Building from source
 
 ```
 git clone --recurse-submodules https://github.com/Aghostinbloom/otogi2-recomp
 cd otogi2-recomp
 python -m venv .venv
 .venv\Scripts\pip install capstone
-# put default.xbe from your disc in input\
+# extract your disc into game\ and copy game\default.xbe to input\
 cd xboxrecomp
 ..\.venv\Scripts\python -m tools.xbe_parser ..\input\default.xbe --json ..\input\default_analysis.json
 ..\.venv\Scripts\python -m tools.disasm ..\input\default.xbe -o ..\analysis\otogi2\disasm -v
+# then func_id, abi_analysis and recomp, exactly as in docs/NOTES.md (Lift)
+cd ..
+powershell -File scripts\build.ps1
+build\otogi2.exe game
 ```
 
-`scripts/xbe_compare.py` compares two analysed XBEs and maps functions from one to the other; it is how the first game's fixes are located in this one.
+`scripts/build.ps1` finds Visual Studio's x64 environment and builds with clang-cl and Ninja (`-Compiler cl` uses MSVC instead). `scripts/xbe_compare.py` compares two analysed XBEs and maps functions from one to the other; it is how the first game's fixes are located in this one.
 
 ## Contributing
 
