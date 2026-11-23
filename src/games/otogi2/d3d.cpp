@@ -44,7 +44,18 @@ extern void sub_001E0370_gen(void);
 extern void sub_001E0750_gen(void);
 extern void sub_001E07B0_gen(void);
 extern void sub_001E0860_gen(void);
+extern void sub_001DEC00_gen(void);
 extern void sub_001E1DB0_gen(void);
+
+// D3DDevice_CopyRects(pSourceSurface, pSourceRectsArray, cRects, pDestinationSurface, pDestPointsArray).
+// The menus copy the back buffer into a texture every frame and draw it back
+// through a pixel shader.
+void sub_001DEC00(void) {
+    gl_hle_pushbuffer_flush();
+    const uint32_t source = arg(0), rects = arg(1), count = arg(2), destination = arg(3), points = arg(4);
+    sub_001DEC00_gen();
+    gl_hle_copy_rects(source, rects, count, destination, points);
+}
 extern void sub_001E1A90_gen(void);
 
 // D3DDevice_BeginPush(esi = dword count) -> eax = where the game writes methods

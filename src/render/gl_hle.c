@@ -755,6 +755,9 @@ typedef struct {
     uint8_t colorop[4], colorarg[4][3], alphaop[4], alphaarg[4][3], result_temp[4];
     uint8_t tex[4];                   /* 0 none, 1 2D, 2 cube */
     uint8_t spec_add, fog, fog_table, alpha_test, alpha_func, flat, point_sprite;
+    /* pixel shader: the NV2A combiner program, constants excluded (uniforms) */
+    uint8_t ps;
+    uint32_t ps_ai[8], ps_ao[8], ps_ri[8], ps_ro[8], ps_f0, ps_f1, ps_ctl, ps_modes;
 } Key;
 
 typedef struct {
@@ -762,6 +765,7 @@ typedef struct {
     GLuint prog;
     GLint u_wv, u_proj, u_texm, u_mat, u_amb, u_ld, u_ls, u_la, u_lp, u_ldir, u_latt, u_lspot;
     GLint u_rhw, u_fog, u_fogcolor, u_tf, u_aref, u_tscale, u_bump, u_c, u_psize, u_tex[4];
+    GLint u_psc, u_psf;
 } Prog;
 
 #define MAX_PROG 1024
@@ -962,6 +966,133 @@ static void gen_vs(const Key *k, Sb *s)
     sb(s, "  gl_PointSize = u_psize;\n}\n");
 }
 
+/* -- Pixel shaders: NV2A register combiners to GLSL ---------------------------
+ *
+ * The D3DPIXELSHADERDEF words are the NV2A's own combiner words; SetPixelShader
+ * copies them into D3D_g_RenderState[0..56] and the texture modes into
+ * PSTEXTUREMODES. Semantics as in the toolkit's CPU model
+ * (src/kernel/nv2a_combiner.c, after xemu's psh.c); the generator follows
+ * Otogi XUnchain's gl_hle.zig (MIT, Copyright (c) 2026 The Otogi XUnchain
+ * contributors). Registers: 0 zero, 1 c0, 2 c1, 3 fog, 4 v0, 5 v1, 8-11
+ * t0-t3, 12 r0, 13 r1, 14 v1+r0 sum and 15 E*F (final combiner only). */
+
+/* An input byte: reg | alpha << 4 | mapping << 5, as RGB (vec3) or alpha (float). */
+static void ps_in(Sb *s, uint32_t byte, int alpha_portion)
+{
+    char x[32];
+    snprintf(x, sizeof x, "R[%u]%s", byte & 0xF,
+             alpha_portion ? ((byte & 0x10) ? ".a" : ".b") : ((byte & 0x10) ? ".aaa" : ".rgb"));
+    switch ((byte >> 5) & 7) {
+    case 0: sb(s, "max(%s, 0.0)", x); break;                         /* unsigned identity */
+    case 1: sb(s, "(1.0 - clamp(%s, 0.0, 1.0))", x); break;          /* unsigned invert */
+    case 2: sb(s, "(2.0 * max(%s, 0.0) - 1.0)", x); break;           /* expand normal */
+    case 3: sb(s, "(-2.0 * max(%s, 0.0) + 1.0)", x); break;          /* expand negate */
+    case 4: sb(s, "(max(%s, 0.0) - 0.5)", x); break;                 /* half-bias normal */
+    case 5: sb(s, "(-max(%s, 0.0) + 0.5)", x); break;                /* half-bias negate */
+    case 6: sb(s, "%s", x); break;                                   /* signed identity */
+    default: sb(s, "(-%s)", x); break;                               /* signed negate */
+    }
+}
+
+/* Output scale and bias, applied to `x`. */
+static const char *ps_out(uint32_t op)
+{
+    switch (op) {
+    case 0x08: return "(x - 0.5)";
+    case 0x10: return "(x * 2.0)";
+    case 0x18: return "((x - 0.5) * 2.0)";
+    case 0x20: return "(x * 4.0)";
+    case 0x30: return "(x * 0.5)";
+    }
+    return "x";
+}
+
+static void gen_ps(const Key *k, Sb *s)
+{
+    static const char names[] = "ABCD";
+    uint32_t st, i, n = k->ps_ctl & 0xFF, flags = k->ps_ctl >> 8;
+
+    sb(s, "  vec4 R[16];\n  for (int i = 0; i < 16; i++) R[i] = vec4(0.0);\n"
+          "  R[3] = vec4(u_fogcolor.rgb, v_fog); R[4] = v_d0; R[5] = v_d1;\n");
+    for (st = 0; st < 4; st++) {
+        uint32_t mode = (k->ps_modes >> (5 * st)) & 0x1F, reg = 8 + st;
+        if (mode == 0)
+            continue;                                               /* NONE: zero */
+        if (mode == 4)                                              /* PASSTHRU */
+            sb(s, "  R[%u] = clamp(v_t%u, 0.0, 1.0);\n", reg, st);
+        else if (k->tex[st] == 2)
+            sb(s, "  R[%u] = texture(u_tex%u, v_t%u.xyz);\n", reg, st, st);
+        else if (k->tex[st]) {
+            if (mode != 1) {                                        /* 3D, bump, dot modes: as 2D */
+                static uint32_t said;
+                if (!(said & (1u << mode)))
+                    fprintf(stderr, "[GL] pixel shader texture mode 0x%X (stage %u) sampled as 2D\n", mode, st);
+                said |= 1u << mode;
+            }
+            sb(s, "  R[%u] = texture(u_tex%u, v_t%u.xy / (v_t%u.w != 0.0 ? v_t%u.w : 1.0) * u_tscale[%u].xy);\n",
+               reg, st, st, st, st, st);
+        } else
+            sb(s, "  R[%u] = vec4(1.0);\n", reg);
+    }
+    sb(s, (k->ps_modes & 0x1F) ? "  R[12].a = R[8].a;\n" : "  R[12].a = 1.0;\n");
+
+    for (i = 0; i < n && i < 8; i++) {
+        uint32_t icw = k->ps_ri[i], ocw = k->ps_ro[i], aicw = k->ps_ai[i], aocw = k->ps_ao[i];
+        uint32_t fl = ocw >> 12, afl = aocw >> 12, j;
+        const char *o = ps_out(fl & 0x38), *ao = ps_out(afl & 0x38);
+
+        sb(s, "  { R[1] = u_psc[%u]; R[2] = u_psc[%u];\n", (flags & 0x010) ? i : 0, 8 + ((flags & 0x100) ? i : 0));
+        sb(s, (flags & 1) ? "    bool mux = R[12].a >= 0.5;\n" : "    bool mux = (int(R[12].a * 255.0) & 1) != 0;\n");
+        /* Both portions read before either writes. */
+        for (j = 0; j < 4; j++) {
+            uint32_t sh = 24 - 8 * j;
+            sb(s, "    vec3 %c = ", names[j]); ps_in(s, (icw >> sh) & 0xFF, 0);
+            sb(s, "; float a%c = ", names[j]); ps_in(s, (aicw >> sh) & 0xFF, 1);
+            sb(s, ";\n");
+        }
+        sb(s, "    vec3 pab = %s; vec3 pcd = %s;\n", (fl & 2) ? "vec3(dot(A, B))" : "A * B",
+           (fl & 1) ? "vec3(dot(C, D))" : "C * D");
+        sb(s, "    vec3 psum = %s; float qab = aA * aB, qcd = aC * aD, qsum = %s;\n",
+           (fl & 4) ? "mux ? pcd : pab" : "pab + pcd", (afl & 4) ? "mux ? qcd : qab" : "qab + qcd");
+        sb(s, "    vec3 x, ab, cd, ms; float aab, acd, ams;\n"
+              "    x = pab; ab = clamp(%s, -1.0, 1.0); x = pcd; cd = clamp(%s, -1.0, 1.0); x = psum; ms = clamp(%s, -1.0, 1.0);\n",
+           o, o, o);
+        sb(s, "    { float x = qab; aab = clamp(%s, -1.0, 1.0); } { float x = qcd; acd = clamp(%s, -1.0, 1.0); }"
+              " { float x = qsum; ams = clamp(%s, -1.0, 1.0); }\n", ao, ao, ao);
+        /* RGB destinations; blue-to-alpha also writes the destination's alpha. */
+        if ((ocw >> 4) & 0xF) sb(s, "    R[%u].rgb = ab;\n", (ocw >> 4) & 0xF);
+        if (((ocw >> 4) & 0xF) && (fl & 0x80)) sb(s, "    R[%u].a = ab.b;\n", (ocw >> 4) & 0xF);
+        if (ocw & 0xF) sb(s, "    R[%u].rgb = cd;\n", ocw & 0xF);
+        if ((ocw & 0xF) && (fl & 0x40)) sb(s, "    R[%u].a = cd.b;\n", ocw & 0xF);
+        if ((ocw >> 8) & 0xF) sb(s, "    R[%u].rgb = ms;\n", (ocw >> 8) & 0xF);
+        if ((aocw >> 4) & 0xF) sb(s, "    R[%u].a = aab;\n", (aocw >> 4) & 0xF);
+        if (aocw & 0xF) sb(s, "    R[%u].a = acd;\n", aocw & 0xF);
+        if ((aocw >> 8) & 0xF) sb(s, "    R[%u].a = ams;\n", (aocw >> 8) & 0xF);
+        sb(s, "    R[0] = vec4(0.0);\n  }\n");
+    }
+
+    if (k->ps_f0 || k->ps_f1) {
+        uint32_t ff = k->ps_f1 & 0xFF;
+        sb(s, "  R[1] = u_psf[0]; R[2] = u_psf[1];\n");
+        /* V1R0 sum: optional complements (0x40 v1, 0x20 r0), clamp (0x80). */
+        sb(s, "  R[14] = vec4(%s%s + %s%s, 0.0);\n", (ff & 0x80) ? "clamp(" : "",
+           (ff & 0x40) ? "(1.0 - R[5].rgb)" : "R[5].rgb", (ff & 0x20) ? "(1.0 - R[12].rgb)" : "R[12].rgb",
+           (ff & 0x80) ? ", 0.0, 1.0)" : "");
+        sb(s, "  { vec3 E = "); ps_in(s, (k->ps_f1 >> 24) & 0xFF, 0);
+        sb(s, "; vec3 F = "); ps_in(s, (k->ps_f1 >> 16) & 0xFF, 0);
+        sb(s, "; R[15] = vec4(E * F, 0.0); }\n  { vec3 A = "); ps_in(s, (k->ps_f0 >> 24) & 0xFF, 0);
+        sb(s, "; vec3 B = "); ps_in(s, (k->ps_f0 >> 16) & 0xFF, 0);
+        sb(s, "; vec3 C = "); ps_in(s, (k->ps_f0 >> 8) & 0xFF, 0);
+        sb(s, "; vec3 D = "); ps_in(s, k->ps_f0 & 0xFF, 0);
+        sb(s, ";\n    cur.rgb = D + C * (1.0 - A) + B * A; cur.a = "); ps_in(s, (k->ps_f1 >> 8) & 0xFF, 1);
+        sb(s, "; }\n");
+    } else {
+        /* No final combiner: D3D supplies one, which fogs r0 when FOGENABLE is set. */
+        sb(s, k->fog ? "  cur = vec4(mix(R[3].rgb, R[12].rgb, R[3].a), R[12].a);\n" : "  cur = R[12];\n");
+    }
+    sb(s, "  cur = clamp(cur, 0.0, 1.0);\n");
+}
+
 static void gen_fs(const Key *k, Sb *s)
 {
     int st;
@@ -973,6 +1104,11 @@ static void gen_fs(const Key *k, Sb *s)
     for (st = 0; st < 4; st++)
         if (k->tex[st])
             sb(s, "uniform %s u_tex%d;\n", k->tex[st] == 2 ? "samplerCube" : "sampler2D", st);
+    if (k->ps) {
+        sb(s, "uniform vec4 u_psc[16], u_psf[2];\nout vec4 o_color;\nvoid main() {\n  vec4 cur;\n");
+        gen_ps(k, s);
+        goto alpha_test;
+    }
     sb(s, "out vec4 o_color;\n"
           "void main() {\n"
           "  vec4 dif = v_d0, spe = v_d1, tf = u_tf, cur = dif, tmp = vec4(0.0), a0, a1, a2;\n");
@@ -1014,6 +1150,7 @@ static void gen_fs(const Key *k, Sb *s)
             sb(s, "  float f = v_fog;\n");
         sb(s, "  cur.rgb = mix(u_fogcolor.rgb, cur.rgb, clamp(f, 0.0, 1.0));\n");
     }
+alpha_test:
     if (k->alpha_test) {
         /* GL_NEVER 0x200 .. GL_ALWAYS 0x207, as the Xbox stores them. */
         static const char *const cmp[8] = { "false", "<", "==", "<=", ">", "!=", ">=", "true" };
@@ -1079,6 +1216,15 @@ static Prog *prog_get(const Key *k)
     s.len = 0;
     s_src[0] = 0;
     gen_fs(k, &s);
+    {
+        const char *dump = getenv("RECOMP_GL_DUMP_SHADERS");
+        if (dump) {
+            char path[512];
+            FILE *f;
+            snprintf(path, sizeof path, "%s/prog_%04d.frag", dump, s_nprog - 1);
+            if ((f = fopen(path, "w")) != NULL) { fputs(s_src, f); fclose(f); }
+        }
+    }
     fs = compile(GL_FRAGMENT_SHADER, s_src);
     if (!vs || !fs)
         return NULL;
@@ -1110,7 +1256,7 @@ static Prog *prog_get(const Key *k)
     U(u_ld, "u_ld"); U(u_ls, "u_ls"); U(u_la, "u_la"); U(u_lp, "u_lp"); U(u_ldir, "u_ldir");
     U(u_latt, "u_latt"); U(u_lspot, "u_lspot"); U(u_rhw, "u_rhw"); U(u_fog, "u_fog");
     U(u_fogcolor, "u_fogcolor"); U(u_tf, "u_tf"); U(u_aref, "u_aref"); U(u_tscale, "u_tscale");
-    U(u_c, "u_c"); U(u_psize, "u_psize");
+    U(u_c, "u_c"); U(u_psize, "u_psize"); U(u_psc, "u_psc"); U(u_psf, "u_psf");
 #undef U
     glUseProgram(p->prog);
     for (i = 0; i < 4; i++) {
@@ -1344,6 +1490,20 @@ static void upload_uniforms(const Prog *p)
         glUniform4fv(p->u_c, NV2A_VS_MAX_CONSTANTS, &s_vsc[0][0]);
     }
     if (p->u_psize >= 0) glUniform1f(p->u_psize, f32(xb_rs(XRS_POINTSIZE)) * (float)s_scale);
+    if (p->u_psc >= 0) {
+        float c[64];
+        for (i = 0; i < 8; i++) {
+            argb_vec(xb_rs(XRS_PSCONSTANT0_0 + (int)i), &c[4 * i]);
+            argb_vec(xb_rs(XRS_PSCONSTANT1_0 + (int)i), &c[32 + 4 * i]);
+        }
+        glUniform4fv(p->u_psc, 16, c);
+    }
+    if (p->u_psf >= 0) {
+        float c[8];
+        argb_vec(xb_rs(XRS_PSFINALCOMBINERCONSTANT0), &c[0]);
+        argb_vec(xb_rs(XRS_PSFINALCOMBINERCONSTANT1), &c[4]);
+        glUniform4fv(p->u_psf, 2, c);
+    }
 }
 
 /* -- Draws ------------------------------------------------------------------- */
@@ -1481,11 +1641,6 @@ static Prog *prepare_draw(HostVs **vs_out)
             memcpy(vs->glsl, s_vsh_body, s.len + 1);
         }
     }
-    if (s_pshader) {
-        static int said;
-        if (!said++)
-            fprintf(stderr, "[GL] pixel shaders not done yet; using texture stages\n");
-    }
     bind_targets();
     if (!s_cur_rt)
         return NULL;
@@ -1497,6 +1652,26 @@ static Prog *prepare_draw(HostVs **vs_out)
     k.spec_add = xb_rs(XRS_SPECULARENABLE) != 0;
     k.fog = xb_rs(XRS_FOGENABLE) != 0;
     k.fog_table = k.fog && xb_rs(XRS_FOGTABLEMODE) != 0 && !vs;
+    if (s_pshader) {
+        int i;
+        k.ps = 1;
+        for (i = 0; i < 8; i++) {
+            k.ps_ai[i] = xb_rs(XRS_PSALPHAINPUTS0 + i);
+            k.ps_ao[i] = xb_rs(XRS_PSALPHAOUTPUTS0 + i);
+            k.ps_ri[i] = xb_rs(XRS_PSRGBINPUTS0 + i);
+            k.ps_ro[i] = xb_rs(XRS_PSRGBOUTPUTS0 + i);
+        }
+        k.ps_f0 = xb_rs(XRS_PSFINALCOMBINERINPUTSABCD);
+        k.ps_f1 = xb_rs(XRS_PSFINALCOMBINERINPUTSEFG);
+        k.ps_ctl = xb_rs(XRS_PSCOMBINERCOUNT);
+        k.ps_modes = xb_rs(XRS_PSTEXTUREMODES);
+        /* The texture-stage ops do not apply: keep them out of the key. */
+        memset(k.colorop, 0, sizeof k.colorop);
+        memset(k.colorarg, 0, sizeof k.colorarg);
+        memset(k.alphaop, 0, sizeof k.alphaop);
+        memset(k.alphaarg, 0, sizeof k.alphaarg);
+        memset(k.result_temp, 0, sizeof k.result_temp);
+    }
     k.alpha_test = xb_rs(XRS_ALPHATESTENABLE) != 0;
     k.alpha_func = k.alpha_test ? (uint8_t)(xb_rs(XRS_ALPHAFUNC) - 0x200) : 0;
     k.flat = xb_rs(XRS_SHADEMODE) == 0x1D00;
@@ -1550,7 +1725,9 @@ static void draw(uint32_t xprim, uint32_t n, const uint16_t *idx,
     uint16_t *ix = NULL;
     GLenum mode;
 
-    if (!n || !prepare_draw(&vs))
+    Prog *prog;
+
+    if (!n || !(prog = prepare_draw(&vs)))
         return;
     {
         /* RECOMP_GL_DRAWLOG=<n>: the first n draws, for bring-up. */
@@ -1562,8 +1739,8 @@ static void draw(uint32_t xprim, uint32_t n, const uint16_t *idx,
         if (left > 0) {
             const float *v = (const float *)(up ? up : NULL);
             left--;
-            fprintf(stderr, "[GL] draw prim %u n %u %s vs %08X stride %u rt %p vp %ux%u+%u+%u z %.2f-%.2f",
-                    xprim, n, idx ? "indexed" : up ? "up" : "stream", s_vshader,
+            fprintf(stderr, "[GL] draw prog %d ps %08X tex %08X prim %u n %u %s vs %08X stride %u rt %p vp %ux%u+%u+%u z %.2f-%.2f",
+                    (int)(prog - s_prog), s_pshader, s_stage_tex[0], xprim, n, idx ? "indexed" : up ? "up" : "stream", s_vshader,
                     up ? up_stride : s_stream_stride[0], (void *)s_cur_rt, s_vp.w, s_vp.h, s_vp.x, s_vp.y,
                     s_vp.minz, s_vp.maxz);
             if (v)
@@ -1914,6 +2091,47 @@ void gl_hle_clear(uint32_t count, uint32_t rects, uint32_t flags, uint32_t color
         }
         if ((f & GL_COLOR_BUFFER_BIT) && s_cur_rt)
             rt_fill(s_cur_rt, r, rects ? count : 0, color);
+    }
+    unlock();
+}
+
+/* The guest's copy has already run on guest memory, which holds nothing the
+ * host drew; the copy is redone on the host targets and the destination's
+ * guest hash recorded, so rt_sync does not replace it with the guest's bytes.
+ * Without rects, the whole source goes to the whole destination, scaled. */
+void gl_hle_copy_rects(uint32_t src, uint32_t rects, uint32_t count, uint32_t dst, uint32_t points)
+{
+    HostRt *s, *d;
+    GLint S = (GLint)s_scale;
+    uint32_t i;
+
+    lock();
+    if (dev_ready() && src && dst && (s = rt_find(res_data(src))) != NULL) {
+        rt_sync(s, 0);
+        d = rt_get(dst, 0);
+        if (d != s) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, s_fbo_read);
+            glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->tex, 0);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_fbo);
+            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d->tex, 0);
+            glDisable(GL_SCISSOR_TEST);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            if (!rects || !count) {
+                glBlitFramebuffer(0, 0, (GLint)s->w * S, (GLint)s->h * S, 0, 0, (GLint)d->w * S, (GLint)d->h * S,
+                                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            } else {
+                for (i = 0; i < count; i++) {
+                    int32_t x1 = SMEM32(rects + 16 * i), y1 = SMEM32(rects + 16 * i + 4);
+                    int32_t x2 = SMEM32(rects + 16 * i + 8), y2 = SMEM32(rects + 16 * i + 12);
+                    int32_t dx = points ? SMEM32(points + 8 * i) : x1, dy = points ? SMEM32(points + 8 * i + 4) : y1;
+                    glBlitFramebuffer(x1 * S, y1 * S, x2 * S, y2 * S, dx * S, dy * S, (dx + x2 - x1) * S,
+                                      (dy + y2 - y1) * S, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+                }
+            }
+            s_cur_rt = NULL;                 /* the draw FBO's attachments changed */
+            glBindFramebuffer(GL_FRAMEBUFFER, s_fbo);
+            d->ghash = hash_bytes((const uint8_t *)gp(d->data), rt_guest_bytes(d));
+        }
     }
     unlock();
 }

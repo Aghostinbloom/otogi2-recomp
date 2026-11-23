@@ -24,6 +24,8 @@ uint32_t gl_hle_back_buffer(void);
 void gl_hle_swap(uint32_t flags, uint32_t back_buffer);
 
 void gl_hle_clear(uint32_t count, uint32_t rects, uint32_t flags, uint32_t color, float z, uint32_t stencil);
+/* After the guest's CopyRects: redo the copy between host targets. */
+void gl_hle_copy_rects(uint32_t source, uint32_t rects, uint32_t count, uint32_t destination, uint32_t points);
 void gl_hle_set_viewport(uint32_t viewport);
 void gl_hle_set_transform(uint32_t state, uint32_t matrix);
 void gl_hle_set_light(uint32_t index, uint32_t light);
