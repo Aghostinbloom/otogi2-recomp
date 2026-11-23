@@ -17,17 +17,17 @@ Toolchain, extraction, XBE analysis, kernel coverage, comparison with the first 
 
 `func_id`, `abi_analysis` and `recomp --all` over Otogi 2; the generated C compiles and links against the toolkit with a stub host. Untranslated instructions are classified by the function that contains them. Exit: the exe links. It also boots as far as D3D initialisation.
 
-## M2: Boot (in progress)
+## M2: Boot (done)
 
 Port the boot fixes through the Otogi 2 profile: DVD media check, asynchronous reads, D3D fences, vblank, XAPI input, the movie step, audio readiness. Exit: the title reaches the first stage under a scripted pad, with no crash for a minute.
 
-Done: D3D fences, vblank, audio readiness, asynchronous reads, heap reclaim, XAPI input, the movie step (movies are skipped until M4). The title reaches the main menu and loads `map\m200`. The DVD media check has not come up. Open: getting from the main menu into a stage without seeing the screen.
+Done: D3D fences, vblank, audio readiness, asynchronous reads, heap reclaim, XAPI input, the movie step (movies are skipped until M4). With the renderer, a pad drives New Game, the settings pages, save creation, the story intro and the in-engine cutscene (`map\m050`) into the first stage (`map\m000`, Seimei), where the game runs and its pause menu works. The DVD media check has not come up.
 
 ## M3: Renderer (in progress)
 
 D3D8 interception on OpenGL ES 3: state mirroring, draws, register combiners, render targets, recorded pushbuffers. Exit: menus and the first stage draw correctly.
 
-Done: the renderer, ANGLE and the window; the game's D3D calls and the 2D it writes into the pushbuffer itself reach it; NV2A register-combiner pixel shaders; CopyRects on the host. The logos and menus draw as on the console. Next: a stage, in 3D.
+Done: the renderer, ANGLE and the window; the game's D3D calls and the 2D it writes into the pushbuffer itself reach it; NV2A register-combiner pixel shaders; CopyRects on the host. The logos and menus draw as on the console. Next: the 3D. The cutscene draws dark, with untextured characters; the stage itself draws black apart from the HUD.
 
 ## M4: Playable
 

@@ -1,6 +1,7 @@
 #include "games/otogi2/profile.hpp"
 #include "host/crash.hpp"
 #include "host/runtime.hpp"
+#include "host/stacks.hpp"
 #include "host/window.hpp"
 #include "render/gl_hle.h"
 
@@ -58,10 +59,15 @@ fs::path save_dir() {
     return dir;
 }
 
+// The runtime tests most options for presence only, so "0" in the environment
+// removes the variable to turn a default off.
 void apply_runtime_defaults() {
     for (const auto &d : kProfile.runtime_defaults) {
-        if (!std::getenv(d.name))
+        const char *set = std::getenv(d.name);
+        if (!set)
             _putenv_s(d.name, d.value);
+        else if (std::strcmp(set, "0") == 0)
+            _putenv_s(d.name, "");
     }
 }
 
@@ -111,6 +117,7 @@ int main(int argc, char **argv) {
     if (!recomp_dispatch_init())
         std::fprintf(stderr, "flat dispatch unavailable; indirect calls use the binary search\n");
     xbox_WatchdogStart();
+    otogi::start_stack_sampler();
 
     std::printf("entry 0x%08X, esp 0x%08X\n", kProfile.entry_point, g_esp);
     entry();

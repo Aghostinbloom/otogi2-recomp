@@ -95,6 +95,17 @@ How things work and what was found, one section per area. Addresses are guest vi
 - `RECOMP_GL_DUMP_SHADERS=<dir>` writes each generated program as `prog_NNNN.vert` and `.frag`; the draw log gives the program number of each draw.
 - Frame dumps: `RECOMP_D3D9_DUMP=<prefix>`, `RECOMP_D3D9_DUMP_EVERY=<frames>` (BMP); `RECOMP_D3D9_STATS=1` prints presents, draws, texture creations and program compilations each second; `RECOMP_GL_DRAWLOG=<n>` prints the first n draws (primitive, count, vertex format, stride, target, viewport, first vertex).
 
+## Into the first stage
+
+- Route: Start through the logos and title, A on New Game, then Game Settings and Sound Settings (four times down to Next Page, A each), Controller Config (A), save slot 01 (A), "Create a new Save Game?" YES (A), A through the story text; A skips the `map\m050` cutscene, then `map\m000` loads. A main menu left alone returns to the title after about 15 s. With a save present the menu starts on Load.
+- Saves are created (`UDATA\46530004\<id>\game.xsv`, `map.xsv` 82 MB, `SaveMeta.xbx`, `saveimage.xbx`), but the Load screen then reports "No Save Game found". The game also looks for the first game's saves (`UDATA\46530002`).
+- In `m000` the screen is black apart from the HUD's fan, but the stage runs: `sub_0004B5A0` (play a stage) is in its loop at `0x0004BA50`, and Start opens the pause menu (map, Seimei level 10, "Go to the deepest area of the cave").
+- The in-engine cutscene draws its sky, terrain and torii, but dark and washed out, with untextured grey characters and a dark rectangle at the top left. Pixel shader texture mode `0x10` is sampled as 2D.
+- Audio plays, choppy: XAudio2 reports hundreds of underruns.
+- `RECOMP_SAVE_DIR=<dir>` keeps a run's saves apart. `RECOMP_PAD_LIVE=<file>` presses each line appended to the file; `RECOMP_PAD_SCRIPT=@<file>` reads a timeline.
+- `OTOGI_STACKS_EVERY=<seconds>` (host) prints, for every thread in the exe, the function it is in and the exe addresses on its stack, named from the symbols (`sub_XXXXXXXX`). It only copies while a thread is suspended; printing then could deadlock on a lock the suspended thread holds.
+- A runtime default can be turned off with `0` in the environment (the runtime tests most options for presence only).
+
 ## Comparison with the first game
 
 The first *Otogi* (USA, title ID `0x46530002`) runs natively in [Otogi XUnchain](https://github.com/Guuzzeji/otogi-xunchain). Both XBEs were analysed the same way and compared with `scripts/xbe_compare.py`, which matches functions on their instructions with addresses masked, then along the call graph from the pairs already found.

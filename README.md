@@ -2,7 +2,7 @@
 
 A native Windows port of *Otogi 2: Immortal Warriors* (FromSoftware, 2004, original Xbox), made by static recompilation. The game's `default.xbe` is translated from x86 to C function by function and compiled for the PC, with a small model of the Xbox around it. No emulator.
 
-> **Status: pre-alpha.** The whole game lifts to C and runs natively in its own window: the logos and menus draw as on the console, through the main menu and into the settings, driven by a scripted pad. Stages are not reached yet. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: pre-alpha.** The whole game lifts to C and runs natively in its own window: the logos and menus draw as on the console, and a new game reaches the first stage, which runs (its pause menu works) but whose 3D does not draw yet. Audio plays, choppy. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 **This repository contains no game code or data.** You build the game from a dump of your own disc. Nothing from the disc, and nothing generated from it (lifted C, disassembly, extracted assets), is ever committed; a check enforces it on every push.
 
