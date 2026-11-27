@@ -33,7 +33,7 @@ Done: the renderer, ANGLE and the window; the game's D3D calls and the 2D it wri
 
 Pacing at the original 30 fps, controller, audio, saves, movies. Exit: a stage played through start to finish.
 
-Started: live sensors (frame times, hitches, freezes, audio underruns) and `scripts/bench.ps1`, which measures a run into the first stage. The first measurement points at audio: the emulated APU produces well under half the samples the device needs. Next: frames without hitches (programs compiled ahead), then audio at full rate.
+Started: live sensors (frame times, hitches, freezes, audio underruns) and `scripts/bench.ps1`, which measures a run into the first stage. Audio now plays at full rate (the host asks Windows for 1 ms timers). Next: frames without hitches (programs compiled ahead), and checking the game's speed against the console's (30 or 60 frames a second).
 
 ## M5: Enhancements
 

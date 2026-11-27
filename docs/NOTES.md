@@ -111,7 +111,7 @@ How things work and what was found, one section per area. Addresses are guest vi
 - Still wrong: the cutscene is darker than the scene it renders, and in the stage a full-screen pass that samples its own target (`ps 0141B040`, blended) leaves the back buffer a flat grey before the final pass, which needs texture mode `0x10`.
 - In `m000` the screen is black apart from the HUD's fan, but the stage runs: `sub_0004B5A0` (play a stage) is in its loop at `0x0004BA50`, and Start opens the pause menu (map, Seimei level 10, "Go to the deepest area of the cave").
 - The in-engine cutscene draws its sky, terrain and torii, but dark and washed out, with untextured grey characters. Pixel shader texture mode `0x10` is sampled as 2D.
-- Audio plays, choppy: XAudio2 reports hundreds of underruns.
+- Audio played choppy until the host asked Windows for 1 ms timers (see Audio).
 - `RECOMP_SAVE_DIR=<dir>` keeps a run's saves apart. `RECOMP_PAD_LIVE=<file>` presses each line appended to the file; `RECOMP_PAD_SCRIPT=@<file>` reads a timeline.
 - `OTOGI_STACKS_EVERY=<seconds>` (host) prints, for every thread in the exe, the function it is in and the exe addresses on its stack, named from the symbols (`sub_XXXXXXXX`). It only copies while a thread is suspended; printing then could deadlock on a lock the suspended thread holds.
 - A runtime default can be turned off with `0` in the environment (the runtime tests most options for presence only).
@@ -126,6 +126,14 @@ How things work and what was found, one section per area. Addresses are guest vi
 - The window title shows the frame rate, the worst frame of the last second, frames over 50 ms and audio underruns a second.
 - `scripts/bench.ps1 [-Game <folder>] [-Seconds 60]` runs a new game into `m000` with a scripted pad, records the audio output (`RECOMP_AUDIO_WAV`), stays in the stage, and writes `report.txt` under `build\bench\`: frame times, hitches, freezes and audio for the stage, and `scripts/audio_report.py` on the recording (stereo or mono, dropouts, clicks, clipping).
 - First benchmark, 60 s in `m000`: 58.5 fps on average (the host caps presents at 60 a second), 39.6 at the lowest second, one frame over 50 ms (192 ms, 14 programs compiled in it), no freeze. Audio is the main fault: 21.5 device underruns a second, the device playing 41% of real time, and the recording holds 37 s of audio for more than 3 minutes of play, so the emulated APU produces well under half the samples it should. What it produces is real stereo (27 s with distinct channels, 9 s identical).
+- After the timer fix (Audio): 58.9 fps on average, 49.2 at the lowest second, one frame over 50 ms (180 ms at the stage's start, 11 programs compiled in it), no freeze; one device underrun in the run, the device playing 100.0% of real time, 176.5 s recorded for about three minutes. The recording's 200 ms silences in the menus fall every 0.7 s, between the menu's sounds for each scripted press.
+- The benchmark waits for screens in the log (`mainmenu_locz.med`, `m000prm.dat`, `SaveMeta.xbx`, `map\m000\scene.dat`) rather than timing them, and taps buttons for 80 ms: at full speed the menus repeat a button held for the pad script's default 150 ms, and the cursor moved twice.
+
+## Audio
+
+- The emulated APU (the toolkit's `apu_core.c`) renders 32-sample frames, one every 0.67 ms, paced by timed waits on a condition variable in milliseconds. Windows rounds those waits up to its timer period, 15.6 ms unless a process asks for less; the toolkit asks for 1 ms (`timeBeginPeriod`) only with `RECOMP_VBLANK=paced`, and the profile uses the tick (`RECOMP_VBLANK=1`). The APU thread then slept 22 to 25 ms at a time (`[APU] no frame for 24 ms ... throttle slept 24 ms`) and produced about 40% of real time.
+- The host now calls `timeBeginPeriod(1)` at start: the device plays 100% of real time with no underruns. The same waits pace the rest of the runtime, so the whole game ran slower before; the menus now repeat a held button as they should at speed.
+- Output: XAudio2, 48 kHz, stereo, 16-bit, four 512-sample buffers. The game's mix is real stereo.
 
 ## Comparison with the first game
 

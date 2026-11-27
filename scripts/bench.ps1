@@ -15,11 +15,14 @@
     (default: build\bench\<date-time>).
 .PARAMETER Seconds
     How long to stay in the stage once it is loaded (default 60).
+.PARAMETER Frames
+    Also write a frame every 2 seconds to <Out>\frames, to see where a run went.
 #>
 param(
     [string]$Game = "",
     [string]$Out = "",
-    [int]$Seconds = 60
+    [int]$Seconds = 60,
+    [switch]$Frames
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -37,29 +40,53 @@ Set-Content $pad -Value $null
 Get-Process otogi2 -ErrorAction SilentlyContinue | Stop-Process -Force
 $vars = @{
     RECOMP_SAVE_DIR   = (Join-Path $Out "save")
-    # Start through the logos and title, then A on New Game.
-    RECOMP_PAD_SCRIPT = ((2000..6200 | Where-Object { ($_ - 2000) % 700 -eq 0 } | ForEach-Object { "${_}:start" }) + @("8500:a")) -join ","
     RECOMP_PAD_LIVE   = $pad
     RECOMP_PERF       = "1"
     RECOMP_AUDIO_WAV  = $wav
+}
+if ($Frames) {
+    New-Item -ItemType Directory -Force (Join-Path $Out "frames") | Out-Null
+    $vars.RECOMP_D3D9_DUMP = Join-Path $Out "frames\f"
+    $vars.RECOMP_D3D9_DUMP_EVERY = "120"
 }
 foreach ($k in $vars.Keys) { Set-Item "env:$k" $vars[$k] }
 $p = Start-Process -FilePath $exe -ArgumentList "`"$Game`"" -RedirectStandardOutput (Join-Path $Out "stdout.txt") `
     -RedirectStandardError $log -PassThru -NoNewWindow
 foreach ($k in $vars.Keys) { Remove-Item "env:$k" }
 
+# Taps of 80 ms: the menus repeat a button held longer (150 ms, the pad
+# script's default hold, moves the cursor twice).
 function Press([string[]]$buttons, [int]$wait) {
-    foreach ($b in $buttons) { Add-Content $pad $b; Start-Sleep -Milliseconds 700 }
+    foreach ($b in $buttons) { Add-Content $pad "${b}:80"; Start-Sleep -Milliseconds 700 }
     Start-Sleep -Milliseconds $wait
 }
 function Seen([string]$pattern) { (Test-Path $log) -and (Select-String -Path $log -Pattern $pattern -Quiet) }
 
-Start-Sleep 16
+# Each screen is waited for in the log rather than timed: how fast the title
+# boots depends on the machine, and a main menu left alone returns to the
+# title after about 15 s.
+function WaitFor([string]$pattern, [int]$seconds, [string]$press = "", [string]$what) {
+    $until = (Get-Date).AddSeconds($seconds)
+    while (-not (Seen $pattern)) {
+        if ((Get-Date) -gt $until -or $p.HasExited) {
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+            throw "$what did not come within $seconds s; see $log"
+        }
+        if ($press) { Press @($press) 0 } else { Start-Sleep -Milliseconds 500 }
+    }
+}
+
+WaitFor 'mainmenu_locz\.med' 60 "start" "the main menu"        # Start through logos and title
+WaitFor 'm000prm\.dat' 20 "" "the main menu's background"
+Press @() 1500
+Press @("a") 3000                                    # New Game
 Press @("down", "down", "down", "down", "a") 3500   # Game Settings, Next Page
 Press @("down", "down", "down", "down", "a") 3500   # Sound Settings, Next Page
 Press @("a") 3500                                    # Controller Config
 Press @("a") 3500                                    # save slot 01
-Press @("a") 14000                                   # "Create a new Save Game?" YES
+Press @("a") 0                                       # "Create a new Save Game?" YES
+WaitFor 'SaveMeta\.xbx' 30 "" "the save"
+Start-Sleep 8
 Press @("a", "a", "a") 6000                          # story text
 $stage = $false
 for ($k = 0; $k -lt 12 -and -not $stage; $k++) {

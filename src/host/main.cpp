@@ -7,6 +7,7 @@
 #include "render/gl_hle.h"
 
 #include <shlobj.h>
+#include <timeapi.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -88,6 +89,11 @@ int main(int argc, char **argv) {
                 game.string().c_str());
 
     apply_runtime_defaults();
+    // Windows sleeps in 15.6 ms steps unless a process asks for 1 ms. The
+    // emulated APU paces its 0.67 ms frames with timed waits; at 15.6 ms it
+    // overslept and produced well under half the audio (docs/NOTES.md, Audio).
+    // The toolkit asks for 1 ms only with RECOMP_VBLANK=paced.
+    timeBeginPeriod(1);
     otogi::install_crash_handler();
     gl_hle_init();
     otogi::start_window(kProfile.name);
