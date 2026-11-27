@@ -47,6 +47,10 @@ void gl_hle_set_vertex_shader_constants(int32_t first_register, uint32_t data, u
 void gl_hle_pushbuffer_flush(void);
 void gl_hle_pushbuffer_restart(void);
 
+/* The guest return address of the draw being handled, for the frame capture
+ * (RECOMP_GL_CAPTURE). */
+void gl_hle_caller(uint32_t return_address);
+
 void gl_hle_draw_vertices_up(uint32_t primitive, uint32_t vertex_count, uint32_t data, uint32_t stride);
 void gl_hle_draw_indexed_vertices_up(uint32_t primitive, uint32_t vertex_count, uint32_t indices,
                                      uint32_t data, uint32_t stride);

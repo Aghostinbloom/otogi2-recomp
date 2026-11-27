@@ -197,7 +197,7 @@ typedef struct {
     uint32_t data, w, h;            /* guest address and size (1x) */
     uint32_t xfmt, pitch;
     uint32_t ghash, synced;
-    int depth;
+    int depth, captured;            /* captured: drawn into during a frame capture */
     GLuint tex, rb;                 /* colour texture, or depth-stencil renderbuffer */
 } HostRt;
 
@@ -717,7 +717,7 @@ static void argb_vec(uint32_t c, float *o)
 #define NV2A_VS_MAX_CONSTANTS    192
 
 typedef struct {
-    uint32_t handle;
+    uint32_t handle, gen;             /* gen: which creation of this handle */
     uint32_t decl[96];
     uint32_t mc[NV2A_VS_MAX_INSTRUCTIONS * 4];
     int nmc;
@@ -726,9 +726,13 @@ typedef struct {
     char *glsl;                       /* translated body, built on first use */
 } HostVs;
 
-#define MAX_VS 128
+/* A stage creates a few hundred programs on top of the menus' and frees
+ * them on unload; a freed handle comes back with other microcode. */
+#define MAX_VS 1024
 static HostVs s_vs[MAX_VS];
 static int s_nvs;
+static uint32_t s_vs_gen;
+/* Indexed by NV2A constant slot (D3D register + 96), as the microcode reads them. */
 static float s_vsc[NV2A_VS_MAX_CONSTANTS][4];
 
 static HostVs *vs_find(uint32_t handle)
@@ -746,6 +750,7 @@ static HostVs *vs_find(uint32_t handle)
  * compares with memcmp. */
 typedef struct {
     HostVs *vs;                       /* a vertex program, or NULL: fixed function */
+    uint32_t vs_gen;
     /* fixed-function vertex half */
     uint8_t rhw, normal, diffuse, specular, ntc, lighting, local_viewer, normalize;
     uint8_t mat_src[4];               /* diffuse, ambient, specular, emissive: 0 material, 1 colour1, 2 colour2 */
@@ -758,7 +763,14 @@ typedef struct {
     /* pixel shader: the NV2A combiner program, constants excluded (uniforms) */
     uint8_t ps;
     uint32_t ps_ai[8], ps_ao[8], ps_ri[8], ps_ro[8], ps_f0, ps_f1, ps_ctl, ps_modes;
+    uint8_t view;                     /* the frame capture's diagnostic view, 0 normal */
 } Key;
+
+/* Diagnostic views of vertex-program draws (RECOMP_GL_CAPTURE): 1 flat
+ * magenta, unculled and on top (coverage), 2 texture 0, 3 diffuse colour,
+ * 4 the pixel shader's colour, 5 its alpha. 2 to 5 are drawn unblended. */
+enum { VIEW_NORMAL, VIEW_COVERAGE, VIEW_TEXTURE0, VIEW_DIFFUSE, VIEW_COLOUR, VIEW_ALPHA };
+static int s_view;
 
 typedef struct {
     Key key;
@@ -862,8 +874,12 @@ static void gen_vs(const Key *k, Sb *s)
         for (i = 0; i < 16; i++)
             if (k->vs->inputs & (1u << i))
                 sb(s, "in vec4 v%d;\n", i);
-        sb(s, "float nv_fog(float d) { d = abs(d); return u_fog.x == 3.0 ? (u_fog.z - d) / (u_fog.z - u_fog.y)\n"
-              "  : u_fog.x == 1.0 ? exp(-d * u_fog.w) : u_fog.x == 2.0 ? exp(-(d * u_fog.w) * (d * u_fog.w)) : 1.0 - d; }\n"
+        /* oFog.x is a distance for table fog, and the factor itself with
+         * FOGTABLEMODE NONE (Otogi writes 1 - z/far). A NaN factor reads as no
+         * fog, as on the NV2A: the title leaves -inf and NaN fog constants
+         * where it does not fog. */
+        sb(s, "float nv_fog(float f) { float d = abs(f); return u_fog.x == 3.0 ? (u_fog.z - d) / (u_fog.z - u_fog.y)\n"
+              "  : u_fog.x == 1.0 ? exp(-d * u_fog.w) : u_fog.x == 2.0 ? exp(-(d * u_fog.w) * (d * u_fog.w)) : f; }\n"
               "float rcc(float x) { float f = 1.0 / x; float m = clamp(abs(f), 5.42101e-20, 1.884467e19); return f < 0.0 ? -m : m; }\n"
               "vec4 nv_log(float x) { float a = abs(x); float e = floor(log2(a)); return a == 0.0 ? vec4(-1e38, 1.0, -1e38, 1.0) : vec4(e, a / exp2(e), log2(a), 1.0); }\n"
               "vec4 nv_lit(vec4 c) { float p = clamp(c.w, -127.9961, 127.9961); return vec4(1.0, max(c.x, 0.0), c.x > 0.0 ? pow(max(c.y, 0.0), p) : 0.0, 1.0); }\n"
@@ -876,7 +892,8 @@ static void gen_vs(const Key *k, Sb *s)
         sb(s, "%s", k->vs->glsl);
         sb(s, "  vec4 p = %s;\n", k->vs->uses_vp ? "vec4(R12.xyz * R12.w, R12.w)" : "R12");
         sb(s, "  gl_Position = vec4(p.x, -p.y, 2.0 * p.z - p.w, p.w);\n"
-              "  v_d0 = clamp(oD0, 0.0, 1.0); v_d1 = clamp(oD1, 0.0, 1.0); v_fog = clamp(nv_fog(oFog.x), 0.0, 1.0); v_eyez = 0.0;\n"
+              "  v_d0 = clamp(oD0, 0.0, 1.0); v_d1 = clamp(oD1, 0.0, 1.0);\n"
+              "  v_fog = nv_fog(oFog.x); v_fog = isnan(v_fog) ? 1.0 : clamp(v_fog, 0.0, 1.0); v_eyez = 0.0;\n"
               "  v_t0 = oT0; v_t1 = oT1; v_t2 = oT2; v_t3 = oT3;\n"
               "  gl_PointSize = u_psize;\n}\n");
         return;
@@ -1151,6 +1168,17 @@ static void gen_fs(const Key *k, Sb *s)
         sb(s, "  cur.rgb = mix(u_fogcolor.rgb, cur.rgb, clamp(f, 0.0, 1.0));\n");
     }
 alpha_test:
+    switch (k->view) {
+    case VIEW_NORMAL: break;
+    case VIEW_COVERAGE: sb(s, "  o_color = vec4(1.0, 0.0, 1.0, 1.0);\n}\n"); return;
+    case VIEW_TEXTURE0:
+        sb(s, k->tex[0] == 1 ? "  o_color = vec4(texture(u_tex0, v_t0.xy * u_tscale[0].xy).rgb, 1.0);\n}\n"
+                             : "  o_color = vec4(1.0, 1.0, 0.0, 1.0);\n}\n");
+        return;
+    case VIEW_DIFFUSE: sb(s, "  o_color = vec4(v_d0.rgb, 1.0);\n}\n"); return;
+    case VIEW_COLOUR: sb(s, "  o_color = vec4(cur.rgb, 1.0);\n}\n"); return;
+    default: sb(s, "  o_color = vec4(vec3(cur.a), 1.0);\n}\n"); return;
+    }
     if (k->alpha_test) {
         /* GL_NEVER 0x200 .. GL_ALWAYS 0x207, as the Xbox stores them. */
         static const char *const cmp[8] = { "false", "<", "==", "<=", ">", "!=", ">=", "true" };
@@ -1319,9 +1347,38 @@ static GLint gl_wrap(uint32_t v)
     return v == 1 ? GL_REPEAT : v == 2 ? GL_MIRRORED_REPEAT : GL_CLAMP_TO_EDGE;
 }
 
+/* A copy of the bound colour target, for a draw that samples the target it
+ * draws into: the NV2A reads the texture as it was, GL leaves a feedback loop
+ * undefined (black on ANGLE). */
+static GLuint s_fb_copy;
+static uint32_t s_fb_copy_w, s_fb_copy_h;
+
+static GLuint rt_feedback_copy(HostRt *r)
+{
+    GLint w = (GLint)(r->w * s_scale), h = (GLint)(r->h * s_scale);
+    uint32_t cw = xb_rs(XRS_COLORWRITEENABLE);
+
+    if (!s_fb_copy || s_fb_copy_w != r->w || s_fb_copy_h != r->h) {
+        if (!s_fb_copy) glGenTextures(1, &s_fb_copy);
+        glBindTexture(GL_TEXTURE_2D, s_fb_copy);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        s_fb_copy_w = r->w;
+        s_fb_copy_h = r->h;
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, s_fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_fbo_read);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_fb_copy, 0);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glColorMask((cw >> 16) & 1, (cw >> 8) & 1, cw & 1, (cw >> 24) & 1);
+    glBindFramebuffer(GL_FRAMEBUFFER, s_fbo);
+    return s_fb_copy;
+}
+
 static void apply_stages(Key *k)
 {
-    int st;
+    int st, copied = 0;
     for (st = 0; st < 4; st++) {
         GLuint t = 0;
         float lw = 0, lh = 0;
@@ -1330,6 +1387,10 @@ static void apply_stages(Key *k)
 
         if (s_stage_tex[st])
             t = tex_get(s_stage_tex[st], s_stage_pal[st], &lw, &lh, &cube);
+        if (t && s_cur_rt && t == s_cur_rt->tex) {
+            t = copied ? s_fb_copy : rt_feedback_copy(s_cur_rt);
+            copied = 1;
+        }
         s_lin[st][0] = lw ? 1.0f / lw : 0;
         s_lin[st][1] = lh ? 1.0f / lh : 0;
         s_tex_cube[st] = cube;
@@ -1506,6 +1567,203 @@ static void upload_uniforms(const Prog *p)
     }
 }
 
+/* -- Frame capture ------------------------------------------------------------ */
+
+/* RECOMP_GL_CAPTURE=<file>: each time the file is written, the next frame is
+ * logged draw by draw ([CAP] lines on stderr), with the draws that were
+ * dropped and the NV2A methods decoded from the pushbuffer, and every colour
+ * target drawn into is written next to the file as <file>_<n>_<address>.bmp.
+ * A target is also written each time the draws move to another one, as
+ * <file>_<n>_pass<k>_<address>.bmp, so passes that later draws overwrite stay
+ * visible. <file>.view selects a diagnostic view (VIEW_*) for every frame. */
+
+static const char *s_cap_path;
+static FILETIME s_cap_mtime;
+static int s_cap;                            /* this frame is being captured */
+static int s_pb_draw;                        /* the draw was decoded from the pushbuffer */
+static const char *s_drop;                   /* why the last prepare_draw returned NULL */
+static uint32_t s_cap_seq, s_cap_pass, s_caller;
+static HostRt *s_cap_rt;                     /* the target the capture's last draw went to */
+static struct { uint32_t method, count; } s_cap_methods[256];
+static int s_cap_nmethods;
+
+/* A colour target as a 24-bit BMP at 1x, averaging the render scale away. */
+static void write_bmp(HostRt *r, const char *path)
+{
+    uint32_t W = r->w, H = r->h, x, y, sx, sy, S = s_scale;
+    uint8_t *px = (uint8_t *)malloc((size_t)W * S * H * S * 4);
+    FILE *f;
+
+    if (!px)
+        return;
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, s_fbo_read);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->tex, 0);
+    glReadPixels(0, 0, (GLsizei)(W * S), (GLsizei)(H * S), GL_RGBA, GL_UNSIGNED_BYTE, px);
+    if ((f = fopen(path, "wb")) != NULL) {
+        uint32_t row = W * 3, pad = (4 - (row & 3)) & 3, filesz = 54 + (row + pad) * H;
+        uint8_t hdr[54] = { 'B', 'M' };
+        memcpy(hdr + 2, &filesz, 4);
+        hdr[10] = 54; hdr[14] = 40;
+        memcpy(hdr + 18, &W, 4);
+        memcpy(hdr + 22, &H, 4);
+        hdr[26] = 1; hdr[28] = 24;
+        fwrite(hdr, 1, sizeof hdr, f);
+        /* Rows are top-down in the target; a BMP is bottom-up. */
+        for (y = H; y-- > 0; ) {
+            for (x = 0; x < W; x++) {
+                uint32_t acc[3] = { 0, 0, 0 }, n = S * S;
+                uint8_t bgr[3];
+                for (sy = 0; sy < S; sy++)
+                    for (sx = 0; sx < S; sx++) {
+                        const uint8_t *p = px + ((size_t)(y * S + sy) * W * S + x * S + sx) * 4;
+                        acc[0] += p[2]; acc[1] += p[1]; acc[2] += p[0];
+                    }
+                bgr[0] = (uint8_t)(acc[0] / n); bgr[1] = (uint8_t)(acc[1] / n); bgr[2] = (uint8_t)(acc[2] / n);
+                fwrite(bgr, 1, 3, f);
+            }
+            fwrite("\0\0\0", 1, pad, f);
+        }
+        fclose(f);
+    }
+    free(px);
+    glBindFramebuffer(GL_FRAMEBUFFER, s_fbo);
+}
+
+static void cap_method(uint32_t key)
+{
+    int i;
+    for (i = 0; i < s_cap_nmethods; i++)
+        if (s_cap_methods[i].method == key) {
+            s_cap_methods[i].count++;
+            return;
+        }
+    if (s_cap_nmethods < (int)(sizeof s_cap_methods / sizeof s_cap_methods[0])) {
+        s_cap_methods[s_cap_nmethods].method = key;
+        s_cap_methods[s_cap_nmethods++].count = 1;
+    }
+}
+
+/* At each present: end the frame being captured, then start one if the
+ * trigger file was written since the last look. */
+static void cap_frame(void)
+{
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    int i;
+
+    if (s_cap) {
+        char path[600];
+        for (i = 0; i < s_nrt; i++) {
+            if (!s_rt[i].captured)
+                continue;
+            s_rt[i].captured = 0;
+            snprintf(path, sizeof path, "%s_%03u_%08X.bmp", s_cap_path, s_cap_seq, s_rt[i].data);
+            write_bmp(&s_rt[i], path);
+            fprintf(stderr, "[CAP] target %08X %ux%u -> %s\n", s_rt[i].data, s_rt[i].w, s_rt[i].h, path);
+        }
+        for (i = 0; i < s_cap_nmethods; i++)
+            fprintf(stderr, "[CAP] pushbuffer method %04X subchannel %u: %u\n", s_cap_methods[i].method & 0x1FFC,
+                    s_cap_methods[i].method >> 13, s_cap_methods[i].count);
+        fprintf(stderr, "[CAP] frame %u captured\n", s_frame);
+        s_cap = 0;
+    }
+    if (!s_cap_path) {
+        s_cap_path = getenv("RECOMP_GL_CAPTURE");
+        if (!s_cap_path)
+            s_cap_path = "";
+        else if (GetFileAttributesExA(s_cap_path, GetFileExInfoStandard, &a))
+            s_cap_mtime = a.ftLastWriteTime;
+    }
+    if (*s_cap_path) {
+        /* <file>.view holds the diagnostic view as one digit (VIEW_*, 0 normal). */
+        char vp[600];
+        FILE *vf;
+        snprintf(vp, sizeof vp, "%s.view", s_cap_path);
+        if ((vf = fopen(vp, "r")) != NULL) {
+            int c = fgetc(vf);
+            fclose(vf);
+            if (c >= '0' && c <= '0' + VIEW_ALPHA && c - '0' != s_view) {
+                s_view = c - '0';
+                fprintf(stderr, "[CAP] diagnostic view %d\n", s_view);
+            }
+        }
+    }
+    if (!*s_cap_path || !GetFileAttributesExA(s_cap_path, GetFileExInfoStandard, &a)
+        || !CompareFileTime(&a.ftLastWriteTime, &s_cap_mtime))
+        return;
+    s_cap_mtime = a.ftLastWriteTime;
+    s_cap = 1;
+    s_cap_seq++;
+    s_cap_nmethods = 0;
+    s_cap_pass = 0;
+    s_cap_rt = NULL;
+    fprintf(stderr, "[CAP] capture %u: frame %u\n", s_cap_seq, s_frame + 1);
+}
+
+static void cap_draw(uint32_t xprim, uint32_t n, const char *src, const Prog *prog)
+{
+    int st;
+    if (!prog) {
+        fprintf(stderr, "[CAP] dropped from %08X: %s; prim %u n %u %s vs %08X ps %08X\n",
+                s_caller, s_drop, xprim, n, src, s_vshader, s_pshader);
+        return;
+    }
+    s_cur_rt->captured = 1;
+    if (s_cur_rt != s_cap_rt) {
+        /* A pass ends: the target it drew, before anything later reads or overwrites it. */
+        if (s_cap_rt) {
+            char path[600];
+            snprintf(path, sizeof path, "%s_%03u_pass%02u_%08X.bmp", s_cap_path, s_cap_seq, s_cap_pass++, s_cap_rt->data);
+            write_bmp(s_cap_rt, path);
+            fprintf(stderr, "[CAP] pass ends: %s\n", path);
+        }
+        s_cap_rt = s_cur_rt;
+    }
+    if (prog->key.vs) {
+        /* The first draw of each vertex program: its inputs, the pixel
+         * shader's combiner state and the non-zero constants. */
+        static uint8_t seen[MAX_PROG];
+        static uint32_t seen_seq;
+        int c;
+        if (seen_seq != s_cap_seq) { memset(seen, 0, sizeof seen); seen_seq = s_cap_seq; }
+        if (!seen[prog - s_prog]++) {
+            VsInput in[16];
+            int ni = vs_inputs(prog->key.vs->decl, in), q;
+            fprintf(stderr, "[CAP] prog %d inputs:", (int)(prog - s_prog));
+            for (q = 0; q < ni; q++)
+                fprintf(stderr, " v%d=s%d+%u:%02X(stride %u vb %08X)", in[q].reg, in[q].stream, in[q].offset, in[q].type,
+                        s_stream_stride[in[q].stream], s_stream_vb[in[q].stream]);
+            fprintf(stderr, " | ps ctl %08X modes %05X alphatest %u func %X ref %u fog %u",
+                    xb_rs(XRS_PSCOMBINERCOUNT), xb_rs(XRS_PSTEXTUREMODES), xb_rs(XRS_ALPHATESTENABLE),
+                    xb_rs(XRS_ALPHAFUNC), xb_rs(XRS_ALPHAREF), xb_rs(XRS_FOGENABLE));
+            for (q = 0; q < 8; q++)
+                fprintf(stderr, " [%08X %08X %08X %08X]", xb_rs(XRS_PSRGBINPUTS0 + q), xb_rs(XRS_PSRGBOUTPUTS0 + q),
+                        xb_rs(XRS_PSALPHAINPUTS0 + q), xb_rs(XRS_PSALPHAOUTPUTS0 + q));
+            fprintf(stderr, " final %08X %08X c0 %08X\n", xb_rs(XRS_PSFINALCOMBINERINPUTSABCD),
+                    xb_rs(XRS_PSFINALCOMBINERINPUTSEFG), xb_rs(XRS_PSCONSTANT0_0));
+            fprintf(stderr, "[CAP] prog %d constants:", (int)(prog - s_prog));
+            for (c = 0; c < NV2A_VS_MAX_CONSTANTS; c++)
+                if (s_vsc[c][0] != 0 || s_vsc[c][1] != 0 || s_vsc[c][2] != 0 || s_vsc[c][3] != 0)
+                    fprintf(stderr, " c%d(%g %g %g %g)", c, s_vsc[c][0], s_vsc[c][1], s_vsc[c][2], s_vsc[c][3]);
+            fprintf(stderr, "\n");
+        }
+    }
+    fprintf(stderr, "[CAP] draw from %08X prog %d prim %u n %u %s vs %08X ps %08X modes %05X rt %08X %ux%u%s"
+            " vp %u,%u %ux%u z %u/%u blend %u %X>%X cull %X",
+            s_caller, (int)(prog - s_prog), xprim, n, src, s_vshader, s_pshader,
+            s_pshader ? xb_rs(XRS_PSTEXTUREMODES) : 0, s_cur_rt->data, s_cur_rt->w, s_cur_rt->h,
+            s_cur_ds ? " +depth" : "", s_vp.x, s_vp.y, s_vp.w, s_vp.h, xb_rs(XRS_ZENABLE), xb_rs(XRS_ZWRITEENABLE),
+            xb_rs(XRS_ALPHABLENDENABLE), xb_rs(XRS_SRCBLEND), xb_rs(XRS_DESTBLEND), xb_rs(XRS_CULLMODE));
+    for (st = 0; st < 4; st++) {
+        uint32_t res = s_stage_tex[st], w, h, pitch;
+        if (!res)
+            continue;
+        surf_dims(res, &w, &h, &pitch);
+        fprintf(stderr, " t%d %08X fmt %02X %ux%u%s", st, res_data(res), (MEM32(res + 0xC) >> 8) & 0xFF, w, h,
+                rt_find(res_data(res)) ? " (target)" : "");
+    }
+    fprintf(stderr, "\n");
+}
+
 /* -- Draws ------------------------------------------------------------------- */
 
 static uint32_t fvf_stride(uint32_t fvf)
@@ -1627,10 +1885,12 @@ static Prog *prepare_draw(HostVs **vs_out)
     Key k;
     HostVs *vs = NULL;
 
+    s_drop = "no GL context";
     if (!dev_ready())
         return NULL;
     if (s_vshader & 1) {
         vs = vs_find(s_vshader);
+        s_drop = "vertex shader handle not created through CreateVertexShader";
         if (!vs)
             return NULL;
         if (!vs->glsl) {
@@ -1642,10 +1902,12 @@ static Prog *prepare_draw(HostVs **vs_out)
         }
     }
     bind_targets();
+    s_drop = "no colour target";
     if (!s_cur_rt)
         return NULL;
     memset(&k, 0, sizeof k);
     k.vs = vs;
+    k.vs_gen = vs ? vs->gen : 0;
     key_vertex(&k);
     apply_render_state();
     apply_stages(&k);
@@ -1675,9 +1937,18 @@ static Prog *prepare_draw(HostVs **vs_out)
     k.alpha_test = xb_rs(XRS_ALPHATESTENABLE) != 0;
     k.alpha_func = k.alpha_test ? (uint8_t)(xb_rs(XRS_ALPHAFUNC) - 0x200) : 0;
     k.flat = xb_rs(XRS_SHADEMODE) == 0x1D00;
+    if (vs && s_view) {
+        k.view = (uint8_t)s_view;
+        glDisable(GL_BLEND);
+        if (s_view == VIEW_COVERAGE) {
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+        }
+    }
     *vs_out = vs;
     {
         Prog *p = prog_get(&k);
+        s_drop = "program does not compile";
         if (!p)
             return NULL;
         glUseProgram(p->prog);
@@ -1727,7 +1998,12 @@ static void draw(uint32_t xprim, uint32_t n, const uint16_t *idx,
 
     Prog *prog;
 
-    if (!n || !(prog = prepare_draw(&vs)))
+    if (!n)
+        return;
+    prog = prepare_draw(&vs);
+    if (s_cap)
+        cap_draw(xprim, n, idx ? "indexed" : s_pb_draw ? "pushbuffer" : up ? "up" : "stream", prog);
+    if (!prog)
         return;
     {
         /* RECOMP_GL_DRAWLOG=<n>: the first n draws, for bring-up. */
@@ -1827,10 +2103,7 @@ static void dump_bmp(HostRt *r)
 {
     static const char *prefix = (const char *)-1;
     static int every, seq;
-    uint32_t W = r->w, H = r->h, x, y, sx, sy, S = s_scale;
-    uint8_t *px;
     char path[512];
-    FILE *f;
 
     if (prefix == (const char *)-1) {
         const char *e = getenv("RECOMP_D3D9_DUMP_EVERY");
@@ -1839,44 +2112,9 @@ static void dump_bmp(HostRt *r)
     }
     if (!prefix || !every || s_frame % every != 0)
         return;
-    px = (uint8_t *)malloc((size_t)W * S * H * S * 4);
-    if (!px)
-        return;
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, s_fbo_read);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->tex, 0);
-    glReadPixels(0, 0, (GLsizei)(W * S), (GLsizei)(H * S), GL_RGBA, GL_UNSIGNED_BYTE, px);
-    {
-        uint32_t row = W * 3, pad = (4 - (row & 3)) & 3, filesz = 54 + (row + pad) * H;
-        uint8_t hdr[54] = { 'B', 'M' };
-        memcpy(hdr + 2, &filesz, 4);
-        hdr[10] = 54; hdr[14] = 40;
-        memcpy(hdr + 18, &W, 4);
-        memcpy(hdr + 22, &H, 4);
-        hdr[26] = 1; hdr[28] = 24;
-        snprintf(path, sizeof path, "%s%05d.bmp", prefix, seq++);
-        if ((f = fopen(path, "wb")) != NULL) {
-            fwrite(hdr, 1, sizeof hdr, f);
-            /* Rows are top-down in the target; a BMP is bottom-up. */
-            for (y = H; y-- > 0; ) {
-                for (x = 0; x < W; x++) {
-                    uint32_t acc[3] = { 0, 0, 0 }, n = S * S;
-                    uint8_t bgr[3];
-                    for (sy = 0; sy < S; sy++)
-                        for (sx = 0; sx < S; sx++) {
-                            const uint8_t *p = px + ((size_t)(y * S + sy) * W * S + x * S + sx) * 4;
-                            acc[0] += p[2]; acc[1] += p[1]; acc[2] += p[0];
-                        }
-                    bgr[0] = (uint8_t)(acc[0] / n); bgr[1] = (uint8_t)(acc[1] / n); bgr[2] = (uint8_t)(acc[2] / n);
-                    fwrite(bgr, 1, 3, f);
-                }
-                fwrite("\0\0\0", 1, pad, f);
-            }
-            fclose(f);
-            fprintf(stderr, "[GL] frame dump %s\n", path);
-        }
-    }
-    free(px);
-    glBindFramebuffer(GL_FRAMEBUFFER, s_fbo);
+    snprintf(path, sizeof path, "%s%05d.bmp", prefix, seq++);
+    write_bmp(r, path);
+    fprintf(stderr, "[GL] frame dump %s\n", path);
 }
 
 static void present(uint32_t data)
@@ -1887,6 +2125,9 @@ static void present(uint32_t data)
     if (!r)
         r = s_cur_rt;
     rt_sync(r, 1);
+    if (r)
+        r->captured |= s_cap;
+    cap_frame();
     s_frame++;
     {
         static int stats = -1;
@@ -1939,12 +2180,13 @@ static void present(uint32_t data)
 
 /* Titles built with D3D8LTCG write some primitives into the pushbuffer
  * themselves: SET_BEGIN_END(prim), INLINE_ARRAY vertices in the current vertex
- * format, SET_BEGIN_END(0). Everything written since the last flush is
- * decoded; other methods are state the mirrored globals already carry. A flush
- * happens before any intercepted D3D call changes state. */
+ * format, SET_BEGIN_END(0). They also write vertex shader constants there
+ * directly. Everything written since the last flush is decoded; other methods
+ * are state the mirrored globals already carry. A flush happens before any
+ * intercepted D3D call changes state. */
 
 static uint32_t s_pb_last;
-static uint32_t s_pb_prim;
+static uint32_t s_pb_prim, s_pb_const;
 static uint8_t *s_pb_verts;
 static uint32_t s_pb_len, s_pb_cap;
 
@@ -1970,17 +2212,27 @@ static void pb_decode(uint32_t p, uint32_t end)
         p += 4;
         if (h == 0)
             continue;
-        if ((h & 0xE0030003) && !(h & 0x40000000))
+        if ((h & 0xE0030003) && !(h & 0x40000000)) {
+            if (s_cap)                          /* old jump 001, new jump 01, call 10, return 0x20000 */
+                fprintf(stderr, "[CAP] pushbuffer %s %08X at %08X; decoding stops\n",
+                        (h & 0xE0000003) == 0x20000000 ? "jump to" : (h & 3) == 1 ? "jump to"
+                        : (h & 3) == 2 ? "call to" : h == 0x00020000 ? "return" : "unknown header",
+                        (h & 0xE0000003) == 0x20000000 ? h & 0x1FFFFFFC : (h & 3) ? h & 0xFFFFFFFC : h, p - 4);
             return;                             /* jump or call: the ring moved */
+        }
         if (p + count * 4 > end)
             return;
+        if (s_cap)
+            cap_method(h & 0xFFFC);
         if (method == 0x17FC && count) {        /* SET_BEGIN_END */
             uint32_t prim = MEM32(p);
             if (prim == 0 && s_pb_prim && s_pb_len) {
                 uint32_t stride = fvf_stride(s_vshader);
-                if (stride && s_pb_len % stride == 0)
+                if (stride && s_pb_len % stride == 0) {
+                    s_pb_draw = 1;
                     draw(s_pb_prim, s_pb_len / stride, NULL, s_pb_verts, stride, 0);
-                else {
+                    s_pb_draw = 0;
+                } else {
                     static int said;
                     if (said++ < 4)
                         fprintf(stderr, "[GL] inline draw skipped: %u bytes, vertex shader %08X stride %u\n",
@@ -1991,6 +2243,18 @@ static void pb_decode(uint32_t p, uint32_t end)
             s_pb_len = 0;
         } else if (method == 0x1818 && s_pb_prim) { /* INLINE_ARRAY */
             pb_append((const uint8_t *)gp(p), count * 4);
+        } else if (method == 0x1EA4 && count) {     /* SET_TRANSFORM_CONSTANT_LOAD: a slot */
+            s_pb_const = MEM32(p);
+        } else if (method >= 0x0B80 && method < 0x0C00) {
+            /* SET_TRANSFORM_CONSTANT: four dwords per slot from the load
+             * slot on. Most of the title's constants only come this way. */
+            uint32_t j, comp = (method - 0x0B80) / 4, incr = !(h & 0x40000000);
+            for (j = 0; j < count; j++, comp += incr) {
+                if (s_pb_const < NV2A_VS_MAX_CONSTANTS)
+                    memcpy(&s_vsc[s_pb_const][comp & 3], gp(p + 4 * j), 4);
+                if ((comp & 3) == 3)
+                    s_pb_const++;
+            }
         }
         p += count * 4;
     }
@@ -2007,6 +2271,8 @@ void gl_hle_pushbuffer_flush(void)
         if (dev_ready())
             pb_decode(s_pb_last, cur);
         unlock();
+    } else if (s_cap && cur != s_pb_last) {
+        fprintf(stderr, "[CAP] pushbuffer put moved %08X -> %08X: not decoded\n", s_pb_last, cur);
     }
     s_pb_last = cur;
 }
@@ -2197,6 +2463,8 @@ void gl_hle_set_indices(uint32_t ib, uint32_t base_vertex)
 
 void gl_hle_set_vertex_shader(uint32_t handle) { s_vshader = handle; }
 
+void gl_hle_caller(uint32_t return_address) { s_caller = return_address; }
+
 void gl_hle_set_pixel_shader(uint32_t handle) { s_pshader = handle; }
 
 void gl_hle_draw_vertices_up(uint32_t prim, uint32_t count, uint32_t data, uint32_t stride)
@@ -2241,10 +2509,16 @@ void gl_hle_create_vertex_shader(uint32_t decl, uint32_t func, uint32_t handle_p
     h = vs_find(MEM32(handle_ptr));
     if (!h && s_nvs < MAX_VS)
         h = &s_vs[s_nvs++];
-    if (h) {
+    if (!h) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "[GL] more than %d vertex shaders: %08X and later ones draw nothing\n", MAX_VS,
+                    MEM32(handle_ptr));
+    } else {
         free(h->glsl);
         memset(h, 0, sizeof *h);
         h->handle = MEM32(handle_ptr);
+        h->gen = ++s_vs_gen;
         for (i = 0; i < 96; i++) {
             h->decl[i] = decl ? MEM32(decl + 4 * i) : 0xFFFFFFFFu;
             if (h->decl[i] == 0xFFFFFFFFu)
@@ -2254,8 +2528,6 @@ void gl_hle_create_vertex_shader(uint32_t decl, uint32_t func, uint32_t handle_p
         h->nmc = (int)(MEM32(func) >> 16);
         if (h->nmc > NV2A_VS_MAX_INSTRUCTIONS) h->nmc = NV2A_VS_MAX_INSTRUCTIONS;
         memcpy(h->mc, gp(func + 4), (size_t)h->nmc * 16);
-        /* ponytail: a recreated handle keeps any program cached on the old
-         * microcode. */
     }
     unlock();
 }

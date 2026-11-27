@@ -17,6 +17,7 @@
 #include <cstring>
 
 using otogi::guest::arg;
+using otogi::guest::mem32;
 using otogi::guest::ret;
 
 namespace {
@@ -168,6 +169,7 @@ void sub_001E0860(void) {
 // D3DDevice_DrawVerticesUP(PrimitiveType, VertexCount, pVertexStreamZeroData, VertexStreamZeroStride)
 void sub_001E0F50(void) {
     gl_hle_pushbuffer_flush();
+    gl_hle_caller(mem32(g_esp));
     gl_hle_draw_vertices_up(arg(0), arg(1), arg(2), arg(3));
     ret(16);
 }
@@ -175,6 +177,7 @@ void sub_001E0F50(void) {
 // D3DDevice_DrawVertices(PrimitiveType, ecx = StartVertex, eax = VertexCount)
 void sub_001E1100(void) {
     gl_hle_pushbuffer_flush();
+    gl_hle_caller(mem32(g_esp));
     gl_hle_draw_vertices(arg(0), g_ecx, g_eax);
     ret(4);
 }
@@ -182,6 +185,7 @@ void sub_001E1100(void) {
 // D3DDevice_DrawIndexedVertices(PrimitiveType, VertexCount, pIndexData)
 void sub_001E11D0(void) {
     gl_hle_pushbuffer_flush();
+    gl_hle_caller(mem32(g_esp));
     gl_hle_draw_indexed_vertices(arg(0), arg(1), arg(2));
     ret(12);
 }

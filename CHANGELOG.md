@@ -18,3 +18,5 @@ All notable changes to this project are listed here. The format follows
 - A game window and the D3D8 renderer (OpenGL ES 3 on ANGLE, from the Sneak King recomp), fed by the game's own D3D calls and by the 2D it writes into the pushbuffer itself. Pixel shaders (NV2A register combiners) and back-buffer copies run on the host, so the logos and menus draw as on the console.
 - A new game reaches the first stage: settings, save creation, story intro and cutscene, then the stage runs and its pause menu works. The stage's 3D does not draw yet.
 - `OTOGI_STACKS_EVERY`: periodic per-thread stacks named from the symbols, for diagnosing hangs.
+- `RECOMP_GL_CAPTURE`: a frame capture on demand, draw by draw, with every render-target pass written as a BMP and diagnostic views of the 3D.
+- The stage's 3D scene now renders into the back buffer: vertex shader constants written straight into the pushbuffer reach the renderer, a stage's few hundred vertex programs fit, a recreated program handle gets its new microcode, a draw that samples its own target reads a copy, and vertex-program fog follows the NV2A. The post-processing that follows still hides it.
