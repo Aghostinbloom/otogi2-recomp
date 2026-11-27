@@ -24,6 +24,7 @@ add_executable(otogi2
     src/host/main.cpp
     src/host/crash.cpp
     src/host/manual.cpp
+    src/host/monitor.cpp
     src/host/stacks.cpp
     src/host/window.cpp
     src/render/gl_hle.c

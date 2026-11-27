@@ -8,4 +8,7 @@ namespace otogi {
 // functions each thread is in. Off otherwise.
 void start_stack_sampler();
 
+// The same report, once, now (the monitor calls it during a freeze).
+void dump_stacks_now();
+
 }  // namespace otogi

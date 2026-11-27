@@ -33,6 +33,8 @@ Done: the renderer, ANGLE and the window; the game's D3D calls and the 2D it wri
 
 Pacing at the original 30 fps, controller, audio, saves, movies. Exit: a stage played through start to finish.
 
+Started: live sensors (frame times, hitches, freezes, audio underruns) and `scripts/bench.ps1`, which measures a run into the first stage. The first measurement points at audio: the emulated APU produces well under half the samples the device needs. Next: frames without hitches (programs compiled ahead), then audio at full rate.
+
 ## M5: Enhancements
 
 Internal resolution, 16:9 with the HUD kept in place, frame interpolation above 30 fps, settings file, and a setup tool that builds the game from the player's disc.

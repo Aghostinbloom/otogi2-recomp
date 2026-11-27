@@ -46,10 +46,6 @@
 
 /* -- Platform: lock, clock, window --------------------------------------- */
 
-static CRITICAL_SECTION s_lock_cs;
-static void lock_init(void) { InitializeCriticalSection(&s_lock_cs); }
-static void lock(void) { EnterCriticalSection(&s_lock_cs); }
-static void unlock(void) { LeaveCriticalSection(&s_lock_cs); }
 static double now_ms(void)
 {
     static LARGE_INTEGER f;
@@ -58,11 +54,31 @@ static double now_ms(void)
     QueryPerformanceCounter(&t);
     return (double)t.QuadPart * 1000.0 / (double)f.QuadPart;
 }
+
+/* The lock also times the renderer: s_in_ms is the time spent inside its
+ * entry points this frame (outermost lock to unlock), the rest of a frame is
+ * the game's own code. */
+static CRITICAL_SECTION s_lock_cs;
+static int s_lock_depth;
+static double s_lock_t0, s_in_ms;
+static void lock_init(void) { InitializeCriticalSection(&s_lock_cs); }
+static void lock(void)
+{
+    EnterCriticalSection(&s_lock_cs);
+    if (!s_lock_depth++)
+        s_lock_t0 = now_ms();
+}
+static void unlock(void)
+{
+    if (!--s_lock_depth)
+        s_in_ms += now_ms() - s_lock_t0;
+    LeaveCriticalSection(&s_lock_cs);
+}
 static void sleep_ms(double ms) { if (ms >= 1) Sleep((DWORD)ms); else Sleep(0); }
 
-/* Per-frame counters, printed with RECOMP_D3D9_STATS. */
+/* Per-frame counters, printed in [HITCH] lines (RECOMP_PERF). */
 typedef struct {
-    unsigned draws, prims, tex_creates, vs_compiles, rt_uploads;
+    unsigned draws, prims, tex_creates, vs_compiles, rt_uploads, depth_convs;
 } RenderStats;
 
 static int s_ready, s_failed, s_s3tc;
@@ -472,6 +488,7 @@ static void zconv_pass(int which, GLuint src, const HostRt *dst)
     GLuint p = zconv_prog(which);
     if (!p)
         return;
+    s_st.depth_convs++;
     glViewport(0, 0, (GLsizei)(dst->w * s_scale), (GLsizei)(dst->h * s_scale));
     glDisable(GL_BLEND);
     glDisable(GL_CULL_FACE);
@@ -2363,6 +2380,98 @@ static void dump_bmp(HostRt *r)
     fprintf(stderr, "[GL] frame dump %s\n", path);
 }
 
+/* -- Frame timing (RECOMP_PERF) ------------------------------------------------ */
+
+/* Each present is timed against the previous one. Every second, with
+ * RECOMP_PERF, a [PERF] line gives the frame rate, the mean, worst and 99th
+ * percentile frame times, the frames over 50 and 100 ms, and the time spent
+ * in the renderer. Each frame over 50 ms gets a [HITCH] line with the work
+ * the renderer did in it. The host's monitor reads the same numbers. */
+
+#define PERF_HITCH_MS 50.0
+static volatile double s_last_present;       /* now_ms() at the last present */
+static volatile uint32_t s_presents;
+static CRITICAL_SECTION s_perf_cs;           /* guards s_perf only, never held long */
+static GlHlePerf s_perf;
+
+static int cmp_float(const void *a, const void *b)
+{
+    float x = *(const float *)a, y = *(const float *)b;
+    return x < y ? -1 : x > y;
+}
+
+static void perf_frame(double now)
+{
+    static int on = -1;
+    static float ms[512];
+    static double t0, in_sum;
+    static unsigned n, over50, over100;
+    static uint32_t f0;
+    double prev = s_last_present, dt = prev ? now - prev : 0.0, renderer = s_in_ms;
+
+    if (on < 0) {
+        const char *e = getenv("RECOMP_PERF");
+        on = e && strcmp(e, "0") != 0;
+        InitializeCriticalSection(&s_perf_cs);
+        t0 = now;
+    }
+    s_last_present = now;
+    s_presents++;
+    s_in_ms = 0;
+    if (prev) {
+        if (n < sizeof ms / sizeof ms[0])
+            ms[n++] = (float)dt;
+        in_sum += renderer;
+        over50 += dt > PERF_HITCH_MS;
+        over100 += dt > 100.0;
+        if (on && dt > PERF_HITCH_MS)
+            fprintf(stderr, "[HITCH] frame %u: %.1f ms, %.1f in the renderer: %u draws, %u textures created,"
+                    " %u programs compiled, %u target uploads, %u depth conversions\n", s_frame, dt, renderer,
+                    s_st.draws, s_st.tex_creates, s_st.vs_compiles, s_st.rt_uploads, s_st.depth_convs);
+    }
+    if (now - t0 < 1000.0 || !n)
+        return;
+    {
+        GlHlePerf p;
+        double sum = 0;
+        unsigned i;
+        for (i = 0; i < n; i++)
+            sum += ms[i];
+        qsort(ms, n, sizeof ms[0], cmp_float);
+        p.fps = (float)((s_frame - f0) * 1000.0 / (now - t0));
+        p.avg_ms = (float)(sum / n);
+        p.worst_ms = ms[n - 1];
+        p.p99_ms = ms[n - 1 - n / 100];
+        p.renderer_ms = (float)(in_sum / n);
+        p.over50 = over50;
+        p.over100 = over100;
+        EnterCriticalSection(&s_perf_cs);
+        s_perf = p;
+        LeaveCriticalSection(&s_perf_cs);
+        if (on)
+            fprintf(stderr, "[PERF] %.1f fps, frame %.1f ms mean, %.1f worst, %.1f 99th percentile;"
+                    " %u over 50 ms, %u over 100 ms; renderer %.1f ms a frame\n",
+                    p.fps, p.avg_ms, p.worst_ms, p.p99_ms, p.over50, p.over100, p.renderer_ms);
+    }
+    t0 = now;
+    f0 = s_frame;
+    n = over50 = over100 = 0;
+    in_sum = 0;
+}
+
+double gl_hle_last_present_ms(void) { return s_last_present; }
+uint32_t gl_hle_presents(void) { return s_presents; }
+
+int gl_hle_perf(GlHlePerf *out)
+{
+    if (!s_presents)
+        return 0;
+    EnterCriticalSection(&s_perf_cs);
+    *out = s_perf;
+    LeaveCriticalSection(&s_perf_cs);
+    return out->fps > 0;
+}
+
 static void present(uint32_t data)
 {
     HostRt *r = data ? rt_find(data) : NULL;
@@ -2375,21 +2484,7 @@ static void present(uint32_t data)
         r->captured |= s_cap;
     cap_frame();
     s_frame++;
-    {
-        static int stats = -1;
-        static double t0;
-        static uint32_t f0;
-        double now = now_ms();
-        if (stats < 0)
-            stats = getenv("RECOMP_D3D9_STATS") && strcmp(getenv("RECOMP_D3D9_STATS"), "0") != 0;
-        if (stats && now - t0 >= 1000) {
-            if (t0)
-                fprintf(stderr, "[GL] %.1f presents/s, %u draws, %u textures created, %u programs compiled\n",
-                        (s_frame - f0) * 1000.0 / (now - t0), s_st.draws, s_st.tex_creates, s_st.vs_compiles);
-            t0 = now;
-            f0 = s_frame;
-        }
-    }
+    perf_frame(now_ms());
     if (!r || !r->tex)
         return;
     dump_bmp(r);

@@ -94,7 +94,7 @@ How things work and what was found, one section per area. Addresses are guest vi
 - `CopyRects` (`0x001DEC00`, 5 on the stack): every menu frame copies the back buffer into a 640x480 texture and draws it back through a pixel shader, as in the first game. Guest memory holds nothing the host drew, so after the guest's copy the renderer blits between the host targets and records the destination's guest hash, so its CPU-side resync does not overwrite the blit. With it the main menu shows its character art and the settings their painted background.
 - `RECOMP_GL_DUMP_SHADERS=<dir>` writes each generated program as `prog_NNNN.vert` and `.frag`; the draw log gives the program number of each draw.
 - Frame capture: `RECOMP_GL_CAPTURE=<file>`. Each time the file is written, the next frame is logged draw by draw on stderr (`[CAP]`: caller, program, primitive, shaders, texture modes, target, viewport, depth, blend, cull, textures; the draws dropped and why; the NV2A methods seen in the pushbuffer). Each target is written as `<file>_<n>_pass<k>_<address>.bmp` when the draws move on to another one, and every target drawn into at the present. A digit in `<file>.view` switches vertex-program draws to a diagnostic view: 1 coverage (flat magenta, on top), 2 texture 0, 3 diffuse, 4 pixel shader colour, 5 its alpha.
-- Frame dumps: `RECOMP_D3D9_DUMP=<prefix>`, `RECOMP_D3D9_DUMP_EVERY=<frames>` (BMP); `RECOMP_D3D9_STATS=1` prints presents, draws, texture creations and program compilations each second; `RECOMP_GL_DRAWLOG=<n>` prints the first n draws (primitive, count, vertex format, stride, target, viewport, first vertex).
+- Frame dumps: `RECOMP_D3D9_DUMP=<prefix>`, `RECOMP_D3D9_DUMP_EVERY=<frames>` (BMP); `RECOMP_GL_DRAWLOG=<n>` prints the first n draws (primitive, count, vertex format, stride, target, viewport, first vertex).
 
 ## Into the first stage
 
@@ -115,6 +115,17 @@ How things work and what was found, one section per area. Addresses are guest vi
 - `RECOMP_SAVE_DIR=<dir>` keeps a run's saves apart. `RECOMP_PAD_LIVE=<file>` presses each line appended to the file; `RECOMP_PAD_SCRIPT=@<file>` reads a timeline.
 - `OTOGI_STACKS_EVERY=<seconds>` (host) prints, for every thread in the exe, the function it is in and the exe addresses on its stack, named from the symbols (`sub_XXXXXXXX`). It only copies while a thread is suspended; printing then could deadlock on a lock the suspended thread holds.
 - A runtime default can be turned off with `0` in the environment (the runtime tests most options for presence only).
+
+## Live sensors and the benchmark
+
+- `RECOMP_PERF` (on by default; `0` turns it off) prints on stderr:
+  - `[PERF]` every second: frame rate, mean, worst and 99th-percentile frame time, frames over 50 and 100 ms, and the time a frame spends in the renderer (from its lock); the rest of a frame is the game's own code;
+  - `[HITCH]` for each frame over 50 ms, with what the renderer did in it (draws, textures created, programs compiled, target uploads, depth conversions);
+  - `[FREEZE]` while no frame has come for 200 ms, with the stacks of every thread (at most every 5 s), then how long it lasted;
+  - `[AUDIO]` every second: device underruns, and the share of real time the device played (XAudio2's samples played against the clock; under 100% is silence the device inserted).
+- The window title shows the frame rate, the worst frame of the last second, frames over 50 ms and audio underruns a second.
+- `scripts/bench.ps1 [-Game <folder>] [-Seconds 60]` runs a new game into `m000` with a scripted pad, records the audio output (`RECOMP_AUDIO_WAV`), stays in the stage, and writes `report.txt` under `build\bench\`: frame times, hitches, freezes and audio for the stage, and `scripts/audio_report.py` on the recording (stereo or mono, dropouts, clicks, clipping).
+- First benchmark, 60 s in `m000`: 58.5 fps on average (the host caps presents at 60 a second), 39.6 at the lowest second, one frame over 50 ms (192 ms, 14 programs compiled in it), no freeze. Audio is the main fault: 21.5 device underruns a second, the device playing 41% of real time, and the recording holds 37 s of audio for more than 3 minutes of play, so the emulated APU produces well under half the samples it should. What it produces is real stereo (27 s with distinct channels, 9 s identical).
 
 ## Comparison with the first game
 

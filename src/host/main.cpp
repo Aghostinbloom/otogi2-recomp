@@ -1,5 +1,6 @@
 #include "games/otogi2/profile.hpp"
 #include "host/crash.hpp"
+#include "host/monitor.hpp"
 #include "host/runtime.hpp"
 #include "host/stacks.hpp"
 #include "host/window.hpp"
@@ -118,6 +119,7 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "flat dispatch unavailable; indirect calls use the binary search\n");
     xbox_WatchdogStart();
     otogi::start_stack_sampler();
+    otogi::start_monitor(kProfile.name);
 
     std::printf("entry 0x%08X, esp 0x%08X\n", kProfile.entry_point, g_esp);
     entry();

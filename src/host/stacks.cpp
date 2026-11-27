@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <thread>
 
 namespace otogi {
@@ -106,14 +107,24 @@ void dump_all_threads() {
     std::fflush(stderr);
 }
 
+void find_image_once() {
+    static std::once_flag once;
+    std::call_once(once, find_image);
+}
+
 }  // namespace
+
+void dump_stacks_now() {
+    find_image_once();
+    dump_all_threads();
+}
 
 void start_stack_sampler() {
     const char *every = std::getenv("OTOGI_STACKS_EVERY");
     const int seconds = every ? std::atoi(every) : 0;
     if (seconds <= 0)
         return;
-    find_image();
+    find_image_once();
     std::thread([seconds] {
         for (;;) {
             Sleep(static_cast<DWORD>(seconds) * 1000);

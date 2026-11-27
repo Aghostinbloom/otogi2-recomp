@@ -9,6 +9,7 @@ inline constexpr RuntimeDefault kOtogi2RuntimeDefaults[] = {
     {"RECOMP_VBLANK", "1"},      // D3D waits on vblank interrupts
     {"RECOMP_AC97_READY", "1"},  // DirectSound needs the codec and the APU
     {"RECOMP_HEAP_RECLAIM", "1"},  // freed memory is reused; off, every movie and load leaks
+    {"RECOMP_PERF", "1"},          // [PERF], [HITCH], [FREEZE] and [AUDIO] lines on stderr
 };
 
 inline constexpr GameProfile kOtogi2{
