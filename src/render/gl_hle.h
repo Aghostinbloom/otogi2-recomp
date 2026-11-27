@@ -47,6 +47,10 @@ void gl_hle_set_vertex_shader_constants(int32_t first_register, uint32_t data, u
 void gl_hle_pushbuffer_flush(void);
 void gl_hle_pushbuffer_restart(void);
 
+/* After the title's SetRenderTarget: draw into the device's targets again,
+ * rather than a surface the title wrote into the pushbuffer itself. */
+void gl_hle_render_target_set(void);
+
 /* The guest return address of the draw being handled, for the frame capture
  * (RECOMP_GL_CAPTURE). */
 void gl_hle_caller(uint32_t return_address);

@@ -198,30 +198,43 @@ typedef struct {
     uint32_t xfmt, pitch;
     uint32_t ghash, synced;
     int depth, captured;            /* captured: drawn into during a frame capture */
-    GLuint tex, rb;                 /* colour texture, or depth-stencil renderbuffer */
+    GLuint tex;                     /* colour, or depth-stencil, texture */
+    GLuint conv;                    /* depth: its bytes as an A8R8G8B8 colour texture */
+    uint32_t written, conv_at;      /* s_serial of the last write; written when conv was made */
 } HostRt;
 
 #define MAX_RT 32
 static HostRt s_rt[MAX_RT];
 static int s_nrt;
 static HostRt *s_cur_rt, *s_cur_ds;
+static uint32_t s_serial;           /* orders writes to targets sharing guest memory */
 
-static HostRt *rt_find(uint32_t data)
+static HostRt *rt_find_kind(uint32_t data, int depth)
 {
     int i;
     for (i = 0; i < s_nrt; i++)
-        if (s_rt[i].data == data && !s_rt[i].depth)
+        if (s_rt[i].data == data && s_rt[i].depth == depth)
             return &s_rt[i];
     return NULL;
 }
 
-static HostRt *rt_get(uint32_t res, int depth)
+static HostRt *rt_find(uint32_t data) { return rt_find_kind(data, 0); }
+
+/* The last value the title wrote to each NV2A 3D method through the
+ * pushbuffer, indexed by method / 4. */
+static uint32_t s_nv[0x800];
+#define NV(m) s_nv[((m) >> 2) & 0x7FF]
+
+/* The surface was last set in the pushbuffer (SET_SURFACE_COLOR_OFFSET), not
+ * by SetRenderTarget: Otogi 2 points some post-processing passes at their
+ * targets that way, leaving the device's render target as it was. */
+static int s_surf_pb;
+
+static HostRt *rt_get_raw(uint32_t data, uint32_t w, uint32_t h, uint32_t pitch, uint32_t xfmt, int depth)
 {
-    uint32_t data = res_data(res), w, h, pitch;
     HostRt *r;
     int i;
 
-    surf_dims(res, &w, &h, &pitch);
     for (i = 0; i < s_nrt; i++) {
         r = &s_rt[i];
         if (r->data == data && r->depth == depth && r->w == w && r->h == h)
@@ -230,25 +243,50 @@ static HostRt *rt_get(uint32_t res, int depth)
     /* ponytail: no eviction; past MAX_RT the last slot is reused. */
     r = &s_rt[s_nrt < MAX_RT ? s_nrt++ : MAX_RT - 1];
     if (r->tex) glDeleteTextures(1, &r->tex);
-    if (r->rb) glDeleteRenderbuffers(1, &r->rb);
+    if (r->conv) glDeleteTextures(1, &r->conv);
     memset(r, 0, sizeof *r);
     r->data = data; r->w = w; r->h = h; r->depth = depth;
-    r->xfmt = (MEM32(res + 0xC) >> 8) & 0xFF;
+    r->xfmt = xfmt;
     r->pitch = pitch ? pitch : w * 4;
     r->synced = (uint32_t)-1;
+    glGenTextures(1, &r->tex);
+    glBindTexture(GL_TEXTURE_2D, r->tex);
     if (depth) {
-        glGenRenderbuffers(1, &r->rb);
-        glBindRenderbuffer(GL_RENDERBUFFER, r->rb);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, (GLsizei)(w * s_scale), (GLsizei)(h * s_scale));
+        /* A texture rather than a renderbuffer: titles read depth back as a
+         * colour texture (see depth_to_colour). */
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, (GLsizei)(w * s_scale), (GLsizei)(h * s_scale), 0,
+                     GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
     } else {
-        glGenTextures(1, &r->tex);
-        glBindTexture(GL_TEXTURE_2D, r->tex);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)(w * s_scale), (GLsizei)(h * s_scale), 0,
                      GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
     }
-    fprintf(stderr, "[GL] %s target %08X %ux%u\n", depth ? "depth" : "colour", data, w, h);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    fprintf(stderr, "[GL] %s target %08X %ux%u format %02X\n", depth ? "depth" : "colour", data, w, h, r->xfmt);
     return r;
+}
+
+/* The host target for a guest surface resource. */
+static HostRt *rt_get(uint32_t res, int depth)
+{
+    uint32_t w, h, pitch;
+    surf_dims(res, &w, &h, &pitch);
+    return rt_get_raw(res_data(res), w, h, pitch, (MEM32(res + 0xC) >> 8) & 0xFF, depth);
+}
+
+/* The targets the NV2A surface registers name: SET_SURFACE_CLIP_HORIZONTAL
+ * and _VERTICAL (size in the high half), SET_SURFACE_FORMAT (colour format in
+ * bits 0-3, zeta in 4-7), SET_SURFACE_PITCH (zeta pitch in the high half),
+ * SET_SURFACE_COLOR_OFFSET and SET_SURFACE_ZETA_OFFSET (physical addresses). */
+static void rt_from_surface_regs(HostRt **c, HostRt **d)
+{
+    uint32_t w = NV(0x0200) >> 16, h = NV(0x0204) >> 16, fmt = NV(0x0208), pitch = NV(0x020C);
+    uint32_t colour = NV(0x0210), zeta = NV(0x0214);
+
+    *c = colour ? rt_get_raw(0x80000000u | colour, w, h, pitch & 0xFFFF, (fmt & 0xF) == 3 ? 0x11 : 0x12, 0) : NULL;
+    *d = zeta ? rt_get_raw(0x80000000u | zeta, w, h, pitch >> 16, ((fmt >> 4) & 0xF) == 1 ? 0x30 : 0x2E, 1) : NULL;
 }
 
 static uint32_t rt_guest_bytes(const HostRt *r) { return r->pitch * r->h; }
@@ -314,6 +352,7 @@ static void rt_upload(HostRt *r)
                       GL_COLOR_BUFFER_BIT, GL_NEAREST);
     s_cur_rt = NULL;                         /* the draw FBO's attachments changed */
     glBindFramebuffer(GL_FRAMEBUFFER, s_fbo);
+    r->written = ++s_serial;
 }
 
 static void rt_sync(HostRt *r, int force)
@@ -353,6 +392,150 @@ static void rt_fill(HostRt *r, const Rect *rects, uint32_t n, uint32_t argb)
         }
     }
     r->ghash = hash_bytes((const uint8_t *)gp(r->data), rt_guest_bytes(r));
+    r->written = ++s_serial;
+}
+
+/* -- Depth read as colour, and colour used as depth ------------------------ */
+
+/* Titles read a LIN_D24S8 depth buffer back as an A8R8G8B8 texture, and bind
+ * a colour target they drew such bytes into as a depth buffer. Each 32-bit
+ * word is depth << 8 | stencil, so as A8R8G8B8: A = depth bits 23..16,
+ * R = 15..8, G = 7..0, B = stencil. Host colour textures hold the guest's R,
+ * G, B, A in that order.
+ *
+ * ponytail: stencil reads as 0 (GL ES 3.0 cannot sample it), and a colour
+ * target used as depth loads no stencil. */
+
+static GLuint compile(GLenum type, const char *src);
+
+static const char *const k_zconv_vs =
+    "#version 300 es\n"
+    "void main() {\n"
+    "  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
+    "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+static const char *const k_depth_to_colour_fs =
+    "#version 300 es\n"
+    "precision highp float;\nprecision highp int;\n"
+    "uniform highp sampler2D u_src;\n"
+    "out vec4 o_color;\n"
+    "void main() {\n"
+    "  ivec2 c = min(ivec2(gl_FragCoord.xy), textureSize(u_src, 0) - 1);\n"
+    "  uint d = uint(texelFetch(u_src, c, 0).r * 16777215.0 + 0.5);\n"
+    "  o_color = vec4(float((d >> 8) & 255u), float(d & 255u), 0.0, float(d >> 16)) / 255.0;\n"
+    "}\n";
+
+static const char *const k_colour_to_depth_fs =
+    "#version 300 es\n"
+    "precision highp float;\nprecision highp int;\n"
+    "uniform highp sampler2D u_src;\n"
+    "void main() {\n"
+    "  ivec2 c = min(ivec2(gl_FragCoord.xy), textureSize(u_src, 0) - 1);\n"
+    "  uvec4 b = uvec4(texelFetch(u_src, c, 0) * 255.0 + 0.5);\n"
+    "  gl_FragDepth = float((b.a << 16) | (b.r << 8) | b.g) / 16777215.0;\n"
+    "}\n";
+
+static GLuint s_zfbo, s_zprog[2];       /* depth to colour, colour to depth */
+
+static GLuint zconv_prog(int which)
+{
+    if (!s_zprog[which]) {
+        GLuint vs = compile(GL_VERTEX_SHADER, k_zconv_vs);
+        GLuint fs = compile(GL_FRAGMENT_SHADER, which ? k_colour_to_depth_fs : k_depth_to_colour_fs);
+        GLint ok = 0;
+        GLuint p = glCreateProgram();
+        if (vs) glAttachShader(p, vs);
+        if (fs) glAttachShader(p, fs);
+        glLinkProgram(p);
+        glGetProgramiv(p, GL_LINK_STATUS, &ok);
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        if (!ok) {
+            fprintf(stderr, "[GL] depth conversion program %d does not link\n", which);
+            glDeleteProgram(p);
+            return 0;
+        }
+        glUseProgram(p);
+        glUniform1i(glGetUniformLocation(p, "u_src"), 4);
+        s_zprog[which] = p;
+    }
+    return s_zprog[which];
+}
+
+/* One full-target pass from src into s_zfbo, whose attachments the caller
+ * set. The caller's draw sets all the state this changes again: bind_targets
+ * the framebuffer and viewport, apply_render_state the rest, prepare_draw the
+ * program. */
+static void zconv_pass(int which, GLuint src, const HostRt *dst)
+{
+    GLuint p = zconv_prog(which);
+    if (!p)
+        return;
+    glViewport(0, 0, (GLsizei)(dst->w * s_scale), (GLsizei)(dst->h * s_scale));
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_POLYGON_OFFSET_FILL);
+    glUseProgram(p);
+    glActiveTexture(GL_TEXTURE4);
+    glBindSampler(4, 0);
+    glBindTexture(GL_TEXTURE_2D, src);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindFramebuffer(GL_FRAMEBUFFER, s_fbo);
+}
+
+static int depth_is_d24(const HostRt *d) { return d->xfmt == 0x2A || d->xfmt == 0x2E; }
+
+/* d->conv from the host depth, if depth was written since it was made. */
+static void depth_to_colour(HostRt *d)
+{
+    if (!depth_is_d24(d)) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "[GL] depth format 0x%02X read as a texture: not handled\n", d->xfmt);
+        return;
+    }
+    if (d->conv && d->conv_at == d->written)
+        return;
+    if (!s_zfbo)
+        glGenFramebuffers(1, &s_zfbo);
+    if (!d->conv) {
+        glGenTextures(1, &d->conv);
+        glBindTexture(GL_TEXTURE_2D, d->conv);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)(d->w * s_scale), (GLsizei)(d->h * s_scale), 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, s_zfbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d->conv, 0);
+    glDisable(GL_DEPTH_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    zconv_pass(0, d->tex, d);
+    d->conv_at = d->written;
+}
+
+/* The host depth d from the colour target c at the same guest address, when
+ * c was drawn since d was last written. */
+static void colour_to_depth(HostRt *d, HostRt *c)
+{
+    if (!depth_is_d24(d) || c->written <= d->written)
+        return;
+    if (!s_zfbo)
+        glGenFramebuffers(1, &s_zfbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, s_zfbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, d->tex, 0);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_ALWAYS);
+    glDepthMask(GL_TRUE);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    zconv_pass(1, c->tex, d);
+    d->written = c->written;                 /* the same bytes: neither is newer */
 }
 
 /* Viewport as the title last set it (1x pixels). */
@@ -366,18 +549,29 @@ static void bind_targets(void)
 {
     uint32_t dev = xb_device();
     uint32_t rt = MEM32(dev + XB_DEV_RENDER_TARGET), ds = MEM32(dev + XB_DEV_DEPTH_STENCIL);
-    HostRt *c = rt ? rt_get(rt, 0) : NULL;
-    HostRt *d = ds ? rt_get(ds, 1) : NULL;
+    HostRt *c, *d;
     uint32_t w = s_vp.w, h = s_vp.h;
 
+    if (s_surf_pb) {
+        rt_from_surface_regs(&c, &d);
+    } else {
+        c = rt ? rt_get(rt, 0) : NULL;
+        d = ds ? rt_get(ds, 1) : NULL;
+    }
+
     rt_sync(c, 0);
+    if (d) {
+        HostRt *dc = rt_find(d->data);
+        if (dc && dc != c)
+            colour_to_depth(d, dc);
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, s_fbo);
     if (c != s_cur_rt) {
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, c ? c->tex : 0, 0);
         s_cur_rt = c;
     }
     if (d != s_cur_ds) {
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, d ? d->rb : 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, d ? d->tex : 0, 0);
         s_cur_ds = d;
     }
     if (c) {
@@ -628,7 +822,18 @@ static GLuint tex_get(uint32_t res, uint32_t pal_res, float *lin_w, float *lin_h
     surf_dims(res, &w, &h, &pitch);
     *lin_w = *lin_h = 0;
     *cube = (format >> 2) & 1;
-    if ((rt = rt_find(data)) != NULL) {
+    rt = rt_find(data);
+    {
+        /* A depth buffer read as a texture: its bytes, converted by
+         * prepare_draw, unless a colour target there was drawn since. */
+        HostRt *z = rt_find_kind(data, 1);
+        if (z && z->conv && (!rt || z->written > rt->written)) {
+            if (size) { *lin_w = (float)z->w; *lin_h = (float)z->h; }
+            *cube = 0;
+            return z->conv;
+        }
+    }
+    if (rt) {
         if (size) { *lin_w = (float)rt->w; *lin_h = (float)rt->h; }
         *cube = 0;
         return rt->tex;
@@ -764,7 +969,21 @@ typedef struct {
     uint8_t ps;
     uint32_t ps_ai[8], ps_ao[8], ps_ri[8], ps_ro[8], ps_f0, ps_f1, ps_ctl, ps_modes;
     uint8_t view;                     /* the frame capture's diagnostic view, 0 normal */
+    uint8_t wbuf;                     /* ZENABLE USEW into a 24-bit depth buffer */
 } Key;
+
+/* W-buffering (ZENABLE D3DZB_USEW, SET_CONTROL0 Z_PERSPECTIVE): the NV2A
+ * stores the fragment's clip-space w, not z. Otogi's projection is scaled so
+ * that w reaches 2^24 - 1 at the far plane, and the title reads those values
+ * back (depth as a texture), so the host stores w too.
+ *
+ * ponytail: writing gl_FragDepth bypasses glPolygonOffset, so ZBIAS and solid
+ * offset do nothing on w-buffered draws. */
+static void gen_wbuf(const Key *k, Sb *s)
+{
+    if (k->wbuf)
+        sb(s, "  gl_FragDepth = clamp(1.0 / (gl_FragCoord.w * 16777215.0), 0.0, 1.0);\n");
+}
 
 /* Diagnostic views of vertex-program draws (RECOMP_GL_CAPTURE): 1 flat
  * magenta, unculled and on top (coverage), 2 texture 0, 3 diffuse colour,
@@ -1123,12 +1342,14 @@ static void gen_fs(const Key *k, Sb *s)
             sb(s, "uniform %s u_tex%d;\n", k->tex[st] == 2 ? "samplerCube" : "sampler2D", st);
     if (k->ps) {
         sb(s, "uniform vec4 u_psc[16], u_psf[2];\nout vec4 o_color;\nvoid main() {\n  vec4 cur;\n");
+        gen_wbuf(k, s);
         gen_ps(k, s);
         goto alpha_test;
     }
     sb(s, "out vec4 o_color;\n"
           "void main() {\n"
           "  vec4 dif = v_d0, spe = v_d1, tf = u_tf, cur = dif, tmp = vec4(0.0), a0, a1, a2;\n");
+    gen_wbuf(k, s);
     for (st = 0; st < 4; st++) {
         if (k->tex[st] == 2)
             sb(s, "  vec4 tx%d = texture(u_tex%d, v_t%d.xyz);\n", st, st, st);
@@ -1753,6 +1974,14 @@ static void cap_draw(uint32_t xprim, uint32_t n, const char *src, const Prog *pr
             s_pshader ? xb_rs(XRS_PSTEXTUREMODES) : 0, s_cur_rt->data, s_cur_rt->w, s_cur_rt->h,
             s_cur_ds ? " +depth" : "", s_vp.x, s_vp.y, s_vp.w, s_vp.h, xb_rs(XRS_ZENABLE), xb_rs(XRS_ZWRITEENABLE),
             xb_rs(XRS_ALPHABLENDENABLE), xb_rs(XRS_SRCBLEND), xb_rs(XRS_DESTBLEND), xb_rs(XRS_CULLMODE));
+    fprintf(stderr, " | %s surface format %08X pitch %08X colour %08X zeta %08X clip %08X %08X",
+            s_surf_pb ? "pushbuffer" : "device", NV(0x0208), NV(0x020C), NV(0x0210), NV(0x0214), NV(0x0200),
+            NV(0x0204));
+    if (s_cur_ds)
+        fprintf(stderr, " | depth %08X fmt %02X control0 %08X clip %g..%g vpscale %g %g %g %g vpoffset %g %g %g %g"
+                " proj33 %g proj43 %g |", s_cur_ds->data, s_cur_ds->xfmt, NV(0x0290), f32(NV(0x0394)), f32(NV(0x0398)),
+                f32(NV(0x0AF0)), f32(NV(0x0AF4)), f32(NV(0x0AF8)), f32(NV(0x0AFC)), f32(NV(0x0A20)),
+                f32(NV(0x0A24)), f32(NV(0x0A28)), f32(NV(0x0A2C)), s_xf[1].m[10], s_xf[1].m[14]);
     for (st = 0; st < 4; st++) {
         uint32_t res = s_stage_tex[st], w, h, pitch;
         if (!res)
@@ -1901,6 +2130,18 @@ static Prog *prepare_draw(HostVs **vs_out)
             memcpy(vs->glsl, s_vsh_body, s.len + 1);
         }
     }
+    {
+        /* Depth buffers this draw reads as textures, before bind_targets:
+         * the conversion changes state that bind_targets and
+         * apply_render_state set again. */
+        int st;
+        for (st = 0; st < 4; st++) {
+            HostRt *z = s_stage_tex[st] ? rt_find_kind(res_data(s_stage_tex[st]), 1) : NULL;
+            HostRt *c = z ? rt_find(z->data) : NULL;
+            if (z && (!c || z->written > c->written))
+                depth_to_colour(z);
+        }
+    }
     bind_targets();
     s_drop = "no colour target";
     if (!s_cur_rt)
@@ -1908,6 +2149,7 @@ static Prog *prepare_draw(HostVs **vs_out)
     memset(&k, 0, sizeof k);
     k.vs = vs;
     k.vs_gen = vs ? vs->gen : 0;
+    k.wbuf = s_cur_ds && xb_rs(XRS_ZENABLE) == 2 && depth_is_d24(s_cur_ds);
     key_vertex(&k);
     apply_render_state();
     apply_stages(&k);
@@ -2005,6 +2247,10 @@ static void draw(uint32_t xprim, uint32_t n, const uint16_t *idx,
         cap_draw(xprim, n, idx ? "indexed" : s_pb_draw ? "pushbuffer" : up ? "up" : "stream", prog);
     if (!prog)
         return;
+    if (xb_rs(XRS_COLORWRITEENABLE))
+        s_cur_rt->written = ++s_serial;
+    if (s_cur_ds && xb_rs(XRS_ZENABLE) && xb_rs(XRS_ZWRITEENABLE))
+        s_cur_ds->written = ++s_serial;
     {
         /* RECOMP_GL_DRAWLOG=<n>: the first n draws, for bring-up. */
         static long left = -1;
@@ -2224,6 +2470,15 @@ static void pb_decode(uint32_t p, uint32_t end)
             return;
         if (s_cap)
             cap_method(h & 0xFFFC);
+        if (!(h & 0xE000)) {                    /* subchannel 0, the 3D class */
+            uint32_t j, incr = !(h & 0x40000000);
+            for (j = 0; j < count; j++) {
+                uint32_t m = (method >> 2) + (incr ? j : 0);
+                s_nv[m & 0x7FF] = MEM32(p + 4 * j);
+                if (m == 0x0210 >> 2)           /* SET_SURFACE_COLOR_OFFSET */
+                    s_surf_pb = 1;
+            }
+        }
         if (method == 0x17FC && count) {        /* SET_BEGIN_END */
             uint32_t prim = MEM32(p);
             if (prim == 0 && s_pb_prim && s_pb_len) {
@@ -2357,6 +2612,8 @@ void gl_hle_clear(uint32_t count, uint32_t rects, uint32_t flags, uint32_t color
         }
         if ((f & GL_COLOR_BUFFER_BIT) && s_cur_rt)
             rt_fill(s_cur_rt, r, rects ? count : 0, color);
+        if (f & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT))
+            s_cur_ds->written = ++s_serial;
     }
     unlock();
 }
@@ -2397,6 +2654,7 @@ void gl_hle_copy_rects(uint32_t src, uint32_t rects, uint32_t count, uint32_t ds
             s_cur_rt = NULL;                 /* the draw FBO's attachments changed */
             glBindFramebuffer(GL_FRAMEBUFFER, s_fbo);
             d->ghash = hash_bytes((const uint8_t *)gp(d->data), rt_guest_bytes(d));
+            d->written = ++s_serial;
         }
     }
     unlock();
@@ -2464,6 +2722,8 @@ void gl_hle_set_indices(uint32_t ib, uint32_t base_vertex)
 void gl_hle_set_vertex_shader(uint32_t handle) { s_vshader = handle; }
 
 void gl_hle_caller(uint32_t return_address) { s_caller = return_address; }
+
+void gl_hle_render_target_set(void) { s_surf_pb = 0; }
 
 void gl_hle_set_pixel_shader(uint32_t handle) { s_pshader = handle; }
 

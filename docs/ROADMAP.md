@@ -27,7 +27,7 @@ Done: D3D fences, vblank, audio readiness, asynchronous reads, heap reclaim, XAP
 
 D3D8 interception on OpenGL ES 3: state mirroring, draws, register combiners, render targets, recorded pushbuffers. Exit: menus and the first stage draw correctly.
 
-Done: the renderer, ANGLE and the window; the game's D3D calls and the 2D it writes into the pushbuffer itself reach it; NV2A register-combiner pixel shaders; CopyRects on the host. The logos and menus draw as on the console. Next: the 3D. The cutscene draws dark, with untextured characters; the stage itself draws black apart from the HUD.
+Done: the renderer, ANGLE and the window; the game's D3D calls and the 2D it writes into the pushbuffer itself reach it; NV2A register-combiner pixel shaders; CopyRects on the host. The logos and menus draw as on the console. The stage's 3D scene renders, with depth stored and read back as on the console and the post-processing passes in their own targets. Next: the rest of the post-processing (dependent texture reads, a pass that greys the stage), then the cutscene's darkness and untextured characters.
 
 ## M4: Playable
 

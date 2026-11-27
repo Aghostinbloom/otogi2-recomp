@@ -88,6 +88,18 @@ void sub_001DE200(void) {
     sub_001DE200_gen();
 }
 
+extern void sub_001DE900_gen(void);
+
+// D3DDevice_SetRenderTarget(pRenderTarget, pNewZStencil). Runs as is. Some
+// passes set the NV2A surface in the pushbuffer themselves; from here on the
+// device's targets are current again. Flushing first keeps the order of the
+// two.
+void sub_001DE900(void) {
+    gl_hle_pushbuffer_flush();
+    sub_001DE900_gen();
+    gl_hle_render_target_set();
+}
+
 // D3DDevice_SetViewport(pViewport)
 void sub_001DF040(void) {
     gl_hle_pushbuffer_flush();
