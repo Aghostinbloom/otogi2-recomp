@@ -55,10 +55,50 @@ void run(std::wstring base) {
     double audio_t0 = 0.0;
     uint64_t played0 = 0;
     unsigned underruns0 = 0, underruns_per_s = 0;
+    // OTOGI_LATE_STACKS=<ms>: the stacks of every thread while a frame is
+    // late by that much, to see what a stutter is made of; from when the file
+    // OTOGI_LATE_STACKS_ARM names exists, if it is set. A diagnostic: taking
+    // them stalls the game, so at most kLateStacksMax per run.
+    const char *late_env = std::getenv("OTOGI_LATE_STACKS");
+    const char *arm = std::getenv("OTOGI_LATE_STACKS_ARM");
+    const double late_ms = late_env ? std::atof(late_env) : 0.0;
+    // OTOGI_GAME_STACKS=<ms>: the same, when the game's own code (the frame
+    // so far minus the renderer's part) has run that long in one frame.
+    const char *game_env = std::getenv("OTOGI_GAME_STACKS");
+    const double game_ms = game_env ? std::atof(game_env) : 0.0;
+    double game_sampled = 0.0;
+    double late_sampled = 0.0;
+    int late_dumps = 0;
+    bool armed = !arm || !*arm;
+    constexpr int kLateStacksMax = 20;
 
     for (;;) {
-        Sleep(10);
+        Sleep(late_ms > 0.0 || game_ms > 0.0 ? 1 : 10);
         const double now = now_ms();
+
+        if ((late_ms > 0.0 || game_ms > 0.0) && !armed && now >= next_second - 1.0)
+            armed = GetFileAttributesA(arm) != INVALID_FILE_ATTRIBUTES;
+        if (game_ms > 0.0 && armed && late_dumps < kLateStacksMax && gl_hle_presents()) {
+            const double started = gl_hle_last_present_ms();
+            const double game = now - started - gl_hle_frame_renderer_ms();
+            if (game > game_ms && game_sampled != started) {
+                game_sampled = started;
+                late_dumps++;
+                std::fprintf(stderr, "[GAME-STACKS] frame %u: the game has run %.1f ms of it\n",
+                             gl_hle_presents() + 1, game);
+                dump_stacks_now();
+            }
+        }
+        if (late_ms > 0.0 && armed && late_dumps < kLateStacksMax && gl_hle_presents()) {
+            const double started = gl_hle_last_present_ms();
+            if (now - started > late_ms && late_sampled != started) {
+                late_sampled = started;
+                late_dumps++;
+                std::fprintf(stderr, "[LATE-STACKS] frame %u is %.1f ms in\n", gl_hle_presents() + 1,
+                             now - started);
+                dump_stacks_now();
+            }
+        }
 
         // A freeze, seen while it lasts: the renderer has not presented for
         // kFreezeMs. Its stacks show where the game is stuck.
@@ -103,8 +143,8 @@ void run(std::wstring base) {
         if (gl_hle_perf(&p)) {
             wchar_t text[256];
             swprintf(text, sizeof text / sizeof text[0],
-                     L"%ls  |  %.1f fps  |  worst %.0f ms  |  %u over 50 ms  |  audio underruns %u/s", base.c_str(),
-                     p.fps, p.worst_ms, p.over50, underruns_per_s);
+                     L"%ls  |  %.1f fps  |  worst %.0f ms  |  %u slow frames  |  audio underruns %u/s", base.c_str(),
+                     p.fps, p.worst_ms, p.slow, underruns_per_s);
             set_title(text);
         }
     }

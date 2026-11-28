@@ -27,6 +27,7 @@
  * points replaced by the gl_hle.h API, which each game's glue calls with the
  * arguments its D3D build passes.
  */
+#include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -36,6 +37,7 @@
 #include <GLES3/gl3.h>
 #include <GLES2/gl2ext.h>
 #include <windows.h>
+#include <intrin.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <EGL/eglext_angle.h>
@@ -2384,11 +2386,46 @@ static void dump_bmp(HostRt *r)
 
 /* Each present is timed against the previous one. Every second, with
  * RECOMP_PERF, a [PERF] line gives the frame rate, the mean, worst and 99th
- * percentile frame times, the frames over 50 and 100 ms, and the time spent
- * in the renderer. Each frame over 50 ms gets a [HITCH] line with the work
- * the renderer did in it. The host's monitor reads the same numbers. */
+ * percentile frame times, the slow frames (longer than the presentation
+ * interval's frame, plus 0.8 ms of timer noise: the previous one shows again,
+ * a stutter), the frames that missed a vblank (half a vblank over), those
+ * over 50 and 100 ms, and the time spent in the renderer. Each frame that
+ * missed a vblank gets a [LATE] line (over 50 ms, [HITCH]) with where its time
+ * went. The host's monitor reads the same numbers. */
 
+#define VBLANK_MS (1001.0 / 60.0)              /* NTSC, 59.94 Hz */
+static uint32_t s_interval = 1;                /* FullScreen_PresentationInterval */
 #define PERF_HITCH_MS 50.0
+static double s_pace_ms;                      /* gl_hle_swap's wait before this present */
+
+static int interval_vblanks(void)
+{
+    return s_interval & 8 ? 4 : s_interval & 4 ? 3 : s_interval & 2 ? 2 : 1;
+}
+
+/* The CPU time the presenting (game) thread used since the last present, from
+ * its cycle count: a late frame that used far less CPU than it took was
+ * waiting, not working. The cycle counter's rate is measured against the
+ * performance counter over the first frames. */
+static double thread_cpu_ms(void)
+{
+    static ULONG64 c_prev, c0;
+    static double q0, per_ms;
+    ULONG64 c = 0;
+    double now = now_ms(), ms;
+
+    QueryThreadCycleTime(GetCurrentThread(), &c);
+    if (!q0) {
+        q0 = now;
+        c0 = __rdtsc();
+    } else if (!per_ms && now - q0 > 500.0) {
+        per_ms = (double)(__rdtsc() - c0) / (now - q0);
+    }
+    ms = per_ms && c_prev ? (double)(c - c_prev) / per_ms : -1.0;
+    c_prev = c;
+    return ms;
+}
+static double s_swap_ms;                      /* the last present's buffer swap */
 static volatile double s_last_present;       /* now_ms() at the last present */
 static volatile uint32_t s_presents;
 static CRITICAL_SECTION s_perf_cs;           /* guards s_perf only, never held long */
@@ -2405,9 +2442,11 @@ static void perf_frame(double now)
     static int on = -1;
     static float ms[512];
     static double t0, in_sum;
-    static unsigned n, over50, over100;
+    static unsigned n, slow, late, over50, over100;
     static uint32_t f0;
-    double prev = s_last_present, dt = prev ? now - prev : 0.0, renderer = s_in_ms;
+    double prev = s_last_present, dt = prev ? now - prev : 0.0, renderer = s_in_ms, cpu = thread_cpu_ms();
+    const double target = interval_vblanks() * VBLANK_MS;
+    const double slow_ms = target + 0.8, late_ms = target + VBLANK_MS / 2;
 
     if (on < 0) {
         const char *e = getenv("RECOMP_PERF");
@@ -2422,13 +2461,21 @@ static void perf_frame(double now)
         if (n < sizeof ms / sizeof ms[0])
             ms[n++] = (float)dt;
         in_sum += renderer;
+        slow += dt > slow_ms;
+        late += dt > late_ms;
         over50 += dt > PERF_HITCH_MS;
         over100 += dt > 100.0;
-        if (on && dt > PERF_HITCH_MS)
-            fprintf(stderr, "[HITCH] frame %u: %.1f ms, %.1f in the renderer: %u draws, %u textures created,"
-                    " %u programs compiled, %u target uploads, %u depth conversions\n", s_frame, dt, renderer,
-                    s_st.draws, s_st.tex_creates, s_st.vs_compiles, s_st.rt_uploads, s_st.depth_convs);
+        /* Where the frame went: the renderer (its last buffer swap
+         * included), the present pacing, and the game's own code. */
+        if (on && dt > late_ms)
+            fprintf(stderr, "[%s] frame %u: %.1f ms: renderer %.1f (swap %.1f), present pacing %.1f, game %.1f;"
+                    " thread on the CPU %.1f; %u draws, %u textures created, %u programs compiled, %u target uploads,"
+                    " %u depth conversions\n",
+                    dt > PERF_HITCH_MS ? "HITCH" : "LATE", s_frame, dt, renderer, s_swap_ms, s_pace_ms,
+                    dt - renderer - s_pace_ms, cpu, s_st.draws, s_st.tex_creates, s_st.vs_compiles, s_st.rt_uploads,
+                    s_st.depth_convs);
     }
+    s_pace_ms = 0;
     if (now - t0 < 1000.0 || !n)
         return;
     {
@@ -2443,6 +2490,9 @@ static void perf_frame(double now)
         p.worst_ms = ms[n - 1];
         p.p99_ms = ms[n - 1 - n / 100];
         p.renderer_ms = (float)(in_sum / n);
+        p.target_ms = (float)target;
+        p.slow = slow;
+        p.late = late;
         p.over50 = over50;
         p.over100 = over100;
         EnterCriticalSection(&s_perf_cs);
@@ -2450,16 +2500,24 @@ static void perf_frame(double now)
         LeaveCriticalSection(&s_perf_cs);
         if (on)
             fprintf(stderr, "[PERF] %.1f fps, frame %.1f ms mean, %.1f worst, %.1f 99th percentile;"
-                    " %u over 50 ms, %u over 100 ms; renderer %.1f ms a frame\n",
-                    p.fps, p.avg_ms, p.worst_ms, p.p99_ms, p.over50, p.over100, p.renderer_ms);
+                    " %u slow, %u missed a vblank, %u over 50 ms, %u over 100 ms (target %.1f ms);"
+                    " renderer %.1f ms a frame\n", p.fps, p.avg_ms, p.worst_ms, p.p99_ms, p.slow, p.late, p.over50,
+                    p.over100, p.target_ms, p.renderer_ms);
     }
     t0 = now;
     f0 = s_frame;
-    n = over50 = over100 = 0;
+    n = slow = late = over50 = over100 = 0;
     in_sum = 0;
 }
 
 double gl_hle_last_present_ms(void) { return s_last_present; }
+double gl_hle_frame_renderer_ms(void)
+{
+    /* Read from another thread without the lock: a close estimate, the call
+     * in progress included. */
+    double t0 = s_lock_t0;
+    return s_in_ms + (s_lock_depth ? now_ms() - t0 : 0.0);
+}
 uint32_t gl_hle_presents(void) { return s_presents; }
 
 int gl_hle_perf(GlHlePerf *out)
@@ -2511,7 +2569,11 @@ static void present(uint32_t data)
         /* Target row 0 is the top; the window's is the bottom: flip. */
         glBlitFramebuffer(0, 0, (GLint)(r->w * s_scale), (GLint)(r->h * s_scale),
                           fx, wh - fy, fx + fw, wh - fy - fh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-        swap_window();
+        {
+            double t = now_ms();
+            swap_window();
+            s_swap_ms = now_ms() - t;
+        }
     }
     glBindFramebuffer(GL_FRAMEBUFFER, s_fbo);
     memset(&s_st, 0, sizeof s_st);
@@ -2643,22 +2705,54 @@ uint32_t gl_hle_back_buffer(void)
     return bb ? res_data(bb) : 0;
 }
 
+/* Presentation interval (gl_hle_set_presentation_interval). On the console a
+ * flip waits for its vblank in the GPU, and the title blocks once the GPU is
+ * a frame behind; here the GPU's fences always read done, so nothing would
+ * hold the title back but this. VBLANK_MS and s_interval are with the frame
+ * timing above. */
+void gl_hle_set_presentation_interval(uint32_t interval)
+{
+    /* RECOMP_PRESENT_INTERVAL=<n> replaces the title's: 1 every vblank (60
+     * a second), 2 every other one, with IMMEDIATE kept. */
+    const char *e = getenv("RECOMP_PRESENT_INTERVAL");
+    s_interval = interval ? interval : 1;      /* D3DPRESENT_INTERVAL_DEFAULT is ONE */
+    if (e && atoi(e) >= 1 && atoi(e) <= 4) {
+        static const uint32_t bits[5] = { 0, 1, 2, 4, 8 };
+        s_interval = (s_interval & 0x80000000u) | bits[atoi(e)];
+    }
+    fprintf(stderr, "[GL] presentation interval 0x%08X: every %d vblank(s)%s%s\n", interval, interval_vblanks(),
+            s_interval & 0x80000000u ? ", a late frame at once" : "",
+            e && atoi(e) >= 1 && atoi(e) <= 4 ? " (RECOMP_PRESENT_INTERVAL)" : "");
+}
+
 void gl_hle_swap(uint32_t flags, uint32_t back_buffer)
 {
     if (flags == 0 || (flags & 4)) {
-        /* A flip waits for vblank on the Xbox (presentation interval one).
-         * Loading loops swap as fast as they can otherwise: at most one
-         * present per 60 Hz frame. */
-        static double last;
-        double now = now_ms();
-        if (last) {
-            double due = last + 1000.0 / 60.0;
+        /* Presents keep a grid of `vblanks` vblanks from the first one. A
+         * frame on time waits for its slot; a late one shows at once with
+         * IMMEDIATE (and starts the grid again from there), or waits for the
+         * next vblank without. */
+        static double next;
+        const int vblanks = interval_vblanks();
+        double now = now_ms(), t0 = now, base;
+        if (next && now < next) {
+            while (now < next) {
+                sleep_ms(next - now - 1);
+                now = now_ms();
+            }
+            base = next;
+        } else if (next && !(s_interval & 0x80000000u)) {
+            double due = next + ceil((now - next) / VBLANK_MS) * VBLANK_MS;
             while (now < due) {
                 sleep_ms(due - now - 1);
                 now = now_ms();
             }
+            base = due;
+        } else {
+            base = now;
         }
-        last = now;
+        next = base + vblanks * VBLANK_MS;
+        s_pace_ms = now - t0;
         lock();
         if (dev_ready())
             present(back_buffer);

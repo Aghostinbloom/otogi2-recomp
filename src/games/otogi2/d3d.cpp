@@ -88,6 +88,18 @@ void sub_001DE200(void) {
     sub_001DE200_gen();
 }
 
+extern void sub_001E20A0_gen(void);
+
+// Direct3D_CreateDevice(pPresentationParameters on the stack; eax, ecx in
+// registers). The title asks for FullScreen_PresentationInterval (+0x30)
+// D3DPRESENT_INTERVAL_TWO | _IMMEDIATE: 30 frames a second. On the console
+// the GPU holds the title back to it; here nothing does, so the renderer
+// paces presents to it.
+void sub_001E20A0(void) {
+    gl_hle_set_presentation_interval(mem32(arg(0) + 0x30));
+    sub_001E20A0_gen();
+}
+
 extern void sub_001DE900_gen(void);
 
 // D3DDevice_SetRenderTarget(pRenderTarget, pNewZStencil). Runs as is. Some

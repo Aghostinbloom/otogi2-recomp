@@ -52,11 +52,22 @@ void gl_hle_pushbuffer_restart(void);
  * until there is one. */
 typedef struct {
     float fps, avg_ms, worst_ms, p99_ms, renderer_ms;
+    float target_ms;                    /* a frame at the presentation interval */
+    unsigned slow;                      /* longer than the target (+0.8 ms): a stutter */
+    unsigned late;                      /* a vblank or more over it */
     unsigned over50, over100;           /* frames longer than 50 and 100 ms */
 } GlHlePerf;
 double gl_hle_last_present_ms(void);
+/* The time spent in the renderer so far in the frame being built, the call in
+ * progress included. */
+double gl_hle_frame_renderer_ms(void);
 uint32_t gl_hle_presents(void);
 int gl_hle_perf(GlHlePerf *out);
+
+/* FullScreen_PresentationInterval from the title's present parameters:
+ * D3DPRESENT_INTERVAL_ONE (1), TWO (2), THREE (4), FOUR (8), optionally with
+ * IMMEDIATE (0x80000000: a late frame shows at once). Swaps are paced to it. */
+void gl_hle_set_presentation_interval(uint32_t interval);
 
 /* After the title's SetRenderTarget: draw into the device's targets again,
  * rather than a surface the title wrote into the pushbuffer itself. */

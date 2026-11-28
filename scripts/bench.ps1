@@ -17,12 +17,20 @@
     How long to stay in the stage once it is loaded (default 60).
 .PARAMETER Frames
     Also write a frame every 2 seconds to <Out>\frames, to see where a run went.
+.PARAMETER LateStacks
+    A diagnostic: once the stage has run 15 s, log every thread's stacks while
+    a frame is that many ms in (OTOGI_LATE_STACKS), up to 20 times.
+.PARAMETER GameStacks
+    The same, when the game's own code has run that many ms in one frame
+    (OTOGI_GAME_STACKS).
 #>
 param(
     [string]$Game = "",
     [string]$Out = "",
     [int]$Seconds = 60,
-    [switch]$Frames
+    [switch]$Frames,
+    [double]$LateStacks = 0,
+    [double]$GameStacks = 0
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -43,6 +51,12 @@ $vars = @{
     RECOMP_PAD_LIVE   = $pad
     RECOMP_PERF       = "1"
     RECOMP_AUDIO_WAV  = $wav
+}
+$arm = Join-Path $Out "late_stacks.arm"
+if ($LateStacks -gt 0 -or $GameStacks -gt 0) {
+    if ($LateStacks -gt 0) { $vars.OTOGI_LATE_STACKS = "$LateStacks" }
+    if ($GameStacks -gt 0) { $vars.OTOGI_GAME_STACKS = "$GameStacks" }
+    $vars.OTOGI_LATE_STACKS_ARM = $arm
 }
 if ($Frames) {
     New-Item -ItemType Directory -Force (Join-Path $Out "frames") | Out-Null
@@ -100,7 +114,11 @@ if (-not $stage) {
 $mark = (Get-Content $log).Count
 Write-Host "m000 loading; staying $Seconds s"
 $end = (Get-Date).AddSeconds($Seconds)
-while ((Get-Date) -lt $end) { Press @("a") 2300 }
+$armAt = (Get-Date).AddSeconds(15)                   # past the stage's loading
+while ((Get-Date) -lt $end) {
+    if (($LateStacks -gt 0 -or $GameStacks -gt 0) -and (Get-Date) -gt $armAt -and -not (Test-Path $arm)) { Set-Content $arm "" }
+    Press @("a") 2300
+}
 Stop-Process -Id $p.Id -Force
 Start-Sleep 1
 
@@ -110,12 +128,17 @@ $perf = $lines | Where-Object { $_ -like "[[]PERF]*" }
 $report = New-Object System.Collections.Generic.List[string]
 $report.Add("Stage m000, $Seconds s after it began loading")
 if ($perf) {
-    $fps = $perf | ForEach-Object { if ($_ -match '\[PERF\] ([\d.]+) fps, frame ([\d.]+) ms mean, ([\d.]+) worst, ([\d.]+) 99th') {
-        [pscustomobject]@{ fps = [double]$Matches[1]; mean = [double]$Matches[2]; worst = [double]$Matches[3]; p99 = [double]$Matches[4] } } }
+    $fps = $perf | ForEach-Object { if ($_ -match '\[PERF\] ([\d.]+) fps, frame ([\d.]+) ms mean, ([\d.]+) worst, ([\d.]+) 99th percentile; (\d+) slow, (\d+) missed a vblank, \d+ over 50 ms, \d+ over 100 ms \(target ([\d.]+) ms\)') {
+        [pscustomobject]@{ fps = [double]$Matches[1]; mean = [double]$Matches[2]; worst = [double]$Matches[3]; p99 = [double]$Matches[4]; slow = [int]$Matches[5]; late = [int]$Matches[6]; target = [double]$Matches[7] } } }
     $m = $fps | Measure-Object fps -Average -Minimum
     $w = $fps | Measure-Object worst -Maximum
     $q = $fps | Measure-Object p99 -Average
+    $l = $fps | Measure-Object late -Sum
+    $sl = $fps | Measure-Object slow -Sum
     $report.Add(("frames: {0:N1} fps on average, {1:N1} at the lowest second; worst frame {2:N0} ms; 99th percentile {3:N1} ms on average" -f $m.Average, $m.Minimum, $w.Maximum, $q.Average))
+    $report.Add(("frame target {0:N1} ms (the presentation interval)" -f ($fps | Select-Object -Last 1).target))
+    $report.Add(("slow frames (over the target, a stutter): {0} in {1} s, in {2} of those seconds" -f $sl.Sum, $fps.Count, @($fps | Where-Object { $_.slow -gt 0 }).Count))
+    $report.Add(("frames that missed a vblank: {0} in {1} s, in {2} of those seconds" -f $l.Sum, $fps.Count, @($fps | Where-Object { $_.late -gt 0 }).Count))
 }
 $hitches = @($lines | Where-Object { $_ -like "[[]HITCH]*" })
 $freezes = @($lines | Where-Object { $_ -like "[[]FREEZE] no frame*" })
@@ -130,6 +153,9 @@ if ($audio) {
 $report.Add("")
 $report.Add("Hitches (first 20):")
 $hitches | Select-Object -First 20 | ForEach-Object { $report.Add("  $_") }
+$report.Add("")
+$report.Add("Late frames, 25 to 50 ms (first 30):")
+$lines | Where-Object { $_ -like "[[]LATE]*" } | Select-Object -First 30 | ForEach-Object { $report.Add("  $_") }
 $report.Add("")
 $report.Add("Audio recording:")
 if (Test-Path $wav) {

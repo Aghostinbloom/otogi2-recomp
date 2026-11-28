@@ -5,7 +5,8 @@
 namespace otogi {
 
 // Live sensors, on their own thread. The window title shows the frame rate,
-// the worst frame of the last second, frames over 50 ms and audio underruns.
+// the worst frame of the last second, slow frames (longer than the
+// presentation interval's: a stutter) and audio underruns.
 // With RECOMP_PERF (on by default) it also prints, every second, an [AUDIO]
 // line (underruns, how far the device kept up with real time), and reports
 // a freeze while it happens: no new frame for 200 ms prints [FREEZE] and the
