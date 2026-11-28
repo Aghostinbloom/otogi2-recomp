@@ -137,7 +137,9 @@ How things work and what was found, one section per area. Addresses are guest vi
 - Its timing counts frames: with no input, the attract movie starts 54.0 s after launch at 30 frames a second and 29.1 s after at 60. At 60 the whole game ran twice as fast; the menus' quick repeat of a held button was the same thing.
 - At 60 a second each frame also had only 16.7 ms, and the main thread needs about 10.5 ms in the renderer and 6 to 11 ms in the game for `m000`: 220 to 390 frames in 60 s came late (about four a second), every second, the worst missing two vblanks.
 - `Direct3D_CreateDevice` is wrapped to read the interval, and the renderer paces presents to it on a 59.94 Hz grid: a frame on time waits for its slot, a late one shows at once with `IMMEDIATE`. In 60 s of `m000`: 29.8 frames a second, 6 slow frames, 1 that missed a vblank, and the 404 ms hitch at the stage's start (21 programs compiled in it).
-- `RECOMP_PRESENT_INTERVAL=<1..4>` replaces the title's interval (1: 60 a second, at double speed). A smooth 60 at the right speed needs frame interpolation (M5).
+- `RECOMP_PRESENT_INTERVAL=<1..4>` replaces the title's interval (1: 60 a second, at double speed). A smooth 60 at the right speed needs frame interpolation or a 60 fps patch of the game's per-frame steps (M5).
+- Programs are cached on disk (`glGetProgramBinary`, in `shader_cache` next to the exe; `RECOMP_GL_CACHE=<dir>` moves it, `=0` turns it off), named by the FNV-1a hash of their two sources and attribute bindings; a binary the driver refuses is compiled and saved again. `m000` start, first run: 22 compiled, worst frame 390 ms. Second run: 0 compiled, 28 loaded, worst frame 82 ms (29 ms in the renderer, 19 textures created; 53 ms of the game's own first frame), lowest second 28.5 frames. The whole run made 75 programs, 1.7 MB. A first run still compiles as it goes.
+- Still to measure: looking a program up compares its key (over 200 bytes) with every cached one, for each of about 1,700 draws a frame.
 
 ## Audio
 

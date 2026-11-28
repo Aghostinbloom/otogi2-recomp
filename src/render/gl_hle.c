@@ -80,7 +80,7 @@ static void sleep_ms(double ms) { if (ms >= 1) Sleep((DWORD)ms); else Sleep(0); 
 
 /* Per-frame counters, printed in [HITCH] lines (RECOMP_PERF). */
 typedef struct {
-    unsigned draws, prims, tex_creates, vs_compiles, rt_uploads, depth_convs;
+    unsigned draws, prims, tex_creates, vs_compiles, prog_loads, rt_uploads, depth_convs;
 } RenderStats;
 
 static int s_ready, s_failed, s_s3tc;
@@ -1447,7 +1447,125 @@ static GLuint compile(GLenum type, const char *src)
     return sh;
 }
 
-static char s_src[256 * 1024];
+static char s_src[256 * 1024], s_src_fs[256 * 1024];
+
+/* -- Programs cached on disk ---------------------------------------------- */
+
+/* Compiling a program costs tens of milliseconds on ANGLE (GLSL, then HLSL,
+ * then D3D bytecode), and a stage meets twenty at once when it starts. Each
+ * linked program is saved (glGetProgramBinary) under the hash of its two
+ * sources, and loaded from there the next time the same sources come up. A
+ * binary the driver no longer takes (another ANGLE, another GPU driver) fails
+ * to load and the program is compiled and saved again.
+ *
+ * RECOMP_GL_CACHE=<dir> sets the folder (default: shader_cache next to the
+ * exe); RECOMP_GL_CACHE=0 turns the cache off. */
+
+#define PROG_CACHE_MAGIC 0x31475450u           /* "PTG1" */
+
+static const char *prog_cache_dir(void)
+{
+    static char dir[MAX_PATH];
+    static int init;
+    if (!init) {
+        const char *e = getenv("RECOMP_GL_CACHE");
+        GLint formats = 0;
+        init = 1;
+        glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &formats);
+        if (formats <= 0)
+            fprintf(stderr, "[GL] no program binary format: programs are not cached\n");
+        else if (e && strcmp(e, "0") != 0)
+            snprintf(dir, sizeof dir, "%s", e);
+        else if (!e && GetModuleFileNameA(NULL, dir, sizeof dir)) {
+            char *slash = strrchr(dir, '\\');
+            if (slash && (size_t)(slash + 1 - dir) + sizeof "shader_cache" <= sizeof dir)
+                strcpy(slash + 1, "shader_cache");
+            else
+                dir[0] = 0;
+        }
+        if (dir[0]) {
+            CreateDirectoryA(dir, NULL);
+            fprintf(stderr, "[GL] program cache in %s\n", dir);
+        }
+    }
+    return dir[0] ? dir : NULL;
+}
+
+static uint64_t fnv64(uint64_t h, const char *s)
+{
+    while (*s) {
+        h ^= (uint8_t)*s++;
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+static void prog_cache_path(char *path, size_t n, const char *dir, uint64_t h, const char *ext)
+{
+    snprintf(path, n, "%s\\%016llx.%s", dir, (unsigned long long)h, ext);
+}
+
+/* Links prog from the cached binary; 0 if there is none or the driver
+ * refuses it. */
+static int prog_cache_load(GLuint prog, uint64_t h)
+{
+    const char *dir = prog_cache_dir();
+    char path[MAX_PATH + 32];
+    uint32_t hdr[3];
+    void *buf;
+    FILE *f;
+    GLint ok = 0;
+
+    if (!dir)
+        return 0;
+    prog_cache_path(path, sizeof path, dir, h, "bin");
+    if ((f = fopen(path, "rb")) == NULL)
+        return 0;
+    if (fread(hdr, 4, 3, f) != 3 || hdr[0] != PROG_CACHE_MAGIC || !hdr[2] || hdr[2] > (64u << 20)
+        || (buf = malloc(hdr[2])) == NULL) {
+        fclose(f);
+        return 0;
+    }
+    if (fread(buf, 1, hdr[2], f) == hdr[2]) {
+        glProgramBinary(prog, (GLenum)hdr[1], buf, (GLsizei)hdr[2]);
+        glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    }
+    free(buf);
+    fclose(f);
+    return ok;
+}
+
+static void prog_cache_save(GLuint prog, uint64_t h)
+{
+    const char *dir = prog_cache_dir();
+    char path[MAX_PATH + 32], tmp[MAX_PATH + 32];
+    GLint len = 0;
+    GLenum format = 0;
+    uint32_t hdr[3];
+    void *buf;
+    FILE *f;
+
+    if (!dir)
+        return;
+    glGetProgramiv(prog, GL_PROGRAM_BINARY_LENGTH, &len);
+    if (len <= 0 || (buf = malloc((size_t)len)) == NULL)
+        return;
+    glGetProgramBinary(prog, len, &len, &format, buf);
+    prog_cache_path(path, sizeof path, dir, h, "bin");
+    prog_cache_path(tmp, sizeof tmp, dir, h, "tmp");
+    if (len > 0 && (f = fopen(tmp, "wb")) != NULL) {
+        int good;
+        hdr[0] = PROG_CACHE_MAGIC;
+        hdr[1] = (uint32_t)format;
+        hdr[2] = (uint32_t)len;
+        good = fwrite(hdr, 4, 3, f) == 3 && fwrite(buf, 1, (size_t)len, f) == (size_t)len;
+        good = fclose(f) == 0 && good;
+        /* Written whole, then renamed: a crash never leaves half a binary. */
+        if (!good || !MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING))
+            DeleteFileA(tmp);
+    }
+    free(buf);
+}
 
 static Prog *prog_get(const Key *k)
 {
@@ -1456,7 +1574,8 @@ static Prog *prog_get(const Key *k)
     Prog *p;
     GLuint vs, fs;
     GLint ok = 0;
-    Sb s = { s_src, sizeof s_src, 0 };
+    Sb s = { s_src, sizeof s_src, 0 }, sf = { s_src_fs, sizeof s_src_fs, 0 };
+    uint64_t h;
     int i;
     char name[32];
 
@@ -1468,9 +1587,9 @@ static Prog *prog_get(const Key *k)
     p = &s_prog[s_nprog++];
     memset(p, 0, sizeof *p);
     p->key = *k;
-    s_st.vs_compiles++;
-    s_src[0] = 0;
+    s_src[0] = s_src_fs[0] = 0;
     gen_vs(k, &s);
+    gen_fs(k, &sf);
     {
         const char *dump = getenv("RECOMP_GL_DUMP_SHADERS");
         if (dump) {
@@ -1478,46 +1597,54 @@ static Prog *prog_get(const Key *k)
             FILE *f;
             snprintf(path, sizeof path, "%s/prog_%04d.vert", dump, s_nprog - 1);
             if ((f = fopen(path, "w")) != NULL) { fputs(s_src, f); fclose(f); }
-        }
-    }
-    vs = compile(GL_VERTEX_SHADER, s_src);
-    s.len = 0;
-    s_src[0] = 0;
-    gen_fs(k, &s);
-    {
-        const char *dump = getenv("RECOMP_GL_DUMP_SHADERS");
-        if (dump) {
-            char path[512];
-            FILE *f;
             snprintf(path, sizeof path, "%s/prog_%04d.frag", dump, s_nprog - 1);
-            if ((f = fopen(path, "w")) != NULL) { fputs(s_src, f); fclose(f); }
+            if ((f = fopen(path, "w")) != NULL) { fputs(s_src_fs, f); fclose(f); }
         }
     }
-    fs = compile(GL_FRAGMENT_SHADER, s_src);
-    if (!vs || !fs)
-        return NULL;
+    /* The sources and the attribute bindings name the program. */
+    h = fnv64(fnv64(fnv64(14695981039346656037ull, s_src), "\n--\n"), s_src_fs);
+    h = fnv64(h, k->vs ? "\n--v" : "\n--ff");
     p->prog = glCreateProgram();
-    glAttachShader(p->prog, vs);
-    glAttachShader(p->prog, fs);
-    if (k->vs) {
-        for (i = 0; i < 16; i++) {
-            snprintf(name, sizeof name, "v%d", i);
-            glBindAttribLocation(p->prog, (GLuint)i, name);
-        }
+    if (prog_cache_load(p->prog, h)) {
+        s_st.prog_loads++;
     } else {
-        for (i = 0; i < (int)(sizeof attr / sizeof attr[0]); i++)
-            glBindAttribLocation(p->prog, (GLuint)i, attr[i]);
-    }
-    glLinkProgram(p->prog);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    glGetProgramiv(p->prog, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[2048];
-        glGetProgramInfoLog(p->prog, sizeof log, NULL, log);
-        fprintf(stderr, "[GL] program does not link: %s\n", log);
-        p->prog = 0;
-        return NULL;
+        s_st.vs_compiles++;
+        vs = compile(GL_VERTEX_SHADER, s_src);
+        fs = compile(GL_FRAGMENT_SHADER, s_src_fs);
+        if (!vs || !fs) {
+            if (vs) glDeleteShader(vs);
+            if (fs) glDeleteShader(fs);
+            glDeleteProgram(p->prog);
+            p->prog = 0;
+            return NULL;
+        }
+        glAttachShader(p->prog, vs);
+        glAttachShader(p->prog, fs);
+        if (k->vs) {
+            for (i = 0; i < 16; i++) {
+                snprintf(name, sizeof name, "v%d", i);
+                glBindAttribLocation(p->prog, (GLuint)i, name);
+            }
+        } else {
+            for (i = 0; i < (int)(sizeof attr / sizeof attr[0]); i++)
+                glBindAttribLocation(p->prog, (GLuint)i, attr[i]);
+        }
+        glProgramParameteri(p->prog, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+        glLinkProgram(p->prog);
+        glDetachShader(p->prog, vs);
+        glDetachShader(p->prog, fs);
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+        glGetProgramiv(p->prog, GL_LINK_STATUS, &ok);
+        if (!ok) {
+            char log[2048];
+            glGetProgramInfoLog(p->prog, sizeof log, NULL, log);
+            fprintf(stderr, "[GL] program does not link: %s\n", log);
+            glDeleteProgram(p->prog);
+            p->prog = 0;
+            return NULL;
+        }
+        prog_cache_save(p->prog, h);
     }
 #define U(f, n) p->f = glGetUniformLocation(p->prog, n)
     U(u_wv, "u_wv"); U(u_proj, "u_proj"); U(u_texm, "u_texm"); U(u_mat, "u_mat"); U(u_amb, "u_amb");
@@ -2442,7 +2569,7 @@ static void perf_frame(double now)
     static int on = -1;
     static float ms[512];
     static double t0, in_sum;
-    static unsigned n, slow, late, over50, over100;
+    static unsigned n, slow, late, over50, over100, compiled, loaded;
     static uint32_t f0;
     double prev = s_last_present, dt = prev ? now - prev : 0.0, renderer = s_in_ms, cpu = thread_cpu_ms();
     const double target = interval_vblanks() * VBLANK_MS;
@@ -2461,6 +2588,8 @@ static void perf_frame(double now)
         if (n < sizeof ms / sizeof ms[0])
             ms[n++] = (float)dt;
         in_sum += renderer;
+        compiled += s_st.vs_compiles;
+        loaded += s_st.prog_loads;
         slow += dt > slow_ms;
         late += dt > late_ms;
         over50 += dt > PERF_HITCH_MS;
@@ -2469,11 +2598,11 @@ static void perf_frame(double now)
          * included), the present pacing, and the game's own code. */
         if (on && dt > late_ms)
             fprintf(stderr, "[%s] frame %u: %.1f ms: renderer %.1f (swap %.1f), present pacing %.1f, game %.1f;"
-                    " thread on the CPU %.1f; %u draws, %u textures created, %u programs compiled, %u target uploads,"
-                    " %u depth conversions\n",
+                    " thread on the CPU %.1f; %u draws, %u textures created, %u programs compiled, %u loaded from the"
+                    " cache, %u target uploads, %u depth conversions\n",
                     dt > PERF_HITCH_MS ? "HITCH" : "LATE", s_frame, dt, renderer, s_swap_ms, s_pace_ms,
-                    dt - renderer - s_pace_ms, cpu, s_st.draws, s_st.tex_creates, s_st.vs_compiles, s_st.rt_uploads,
-                    s_st.depth_convs);
+                    dt - renderer - s_pace_ms, cpu, s_st.draws, s_st.tex_creates, s_st.vs_compiles, s_st.prog_loads,
+                    s_st.rt_uploads, s_st.depth_convs);
     }
     s_pace_ms = 0;
     if (now - t0 < 1000.0 || !n)
@@ -2501,12 +2630,13 @@ static void perf_frame(double now)
         if (on)
             fprintf(stderr, "[PERF] %.1f fps, frame %.1f ms mean, %.1f worst, %.1f 99th percentile;"
                     " %u slow, %u missed a vblank, %u over 50 ms, %u over 100 ms (target %.1f ms);"
-                    " renderer %.1f ms a frame\n", p.fps, p.avg_ms, p.worst_ms, p.p99_ms, p.slow, p.late, p.over50,
-                    p.over100, p.target_ms, p.renderer_ms);
+                    " renderer %.1f ms a frame; programs %u compiled, %u from the cache\n", p.fps, p.avg_ms,
+                    p.worst_ms, p.p99_ms, p.slow, p.late, p.over50, p.over100, p.target_ms, p.renderer_ms, compiled,
+                    loaded);
     }
     t0 = now;
     f0 = s_frame;
-    n = slow = late = over50 = over100 = 0;
+    n = slow = late = over50 = over100 = compiled = loaded = 0;
     in_sum = 0;
 }
 

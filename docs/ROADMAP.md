@@ -33,7 +33,7 @@ Done: the renderer, ANGLE and the window; the game's D3D calls and the 2D it wri
 
 Pacing at the original 30 fps, controller, audio, saves, movies. Exit: a stage played through start to finish.
 
-Started: live sensors (frame times, hitches, freezes, audio underruns) and `scripts/bench.ps1`, which measures a run into the first stage. Audio now plays at full rate (the host asks Windows for 1 ms timers). The game runs at its own 30 frames a second (presentation interval two; it counts time in frames, so at 60 it ran twice as fast), and the stage's frames come on time. Next: the hitch when a stage starts (programs compiled ahead or cached).
+Started: live sensors (frame times, hitches, freezes, audio underruns) and `scripts/bench.ps1`, which measures a run into the first stage. Audio now plays at full rate (the host asks Windows for 1 ms timers). The game runs at its own 30 frames a second (presentation interval two; it counts time in frames, so at 60 it ran twice as fast), and the stage's frames come on time. Compiled programs are cached on disk, so a stage starts with an 82 ms hitch instead of 390 ms once it has been played. Later: the first run's compiles, the game's own first frame of a stage, and a 60 fps option.
 
 ## M5: Enhancements
 

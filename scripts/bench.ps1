@@ -139,6 +139,10 @@ if ($perf) {
     $report.Add(("frame target {0:N1} ms (the presentation interval)" -f ($fps | Select-Object -Last 1).target))
     $report.Add(("slow frames (over the target, a stutter): {0} in {1} s, in {2} of those seconds" -f $sl.Sum, $fps.Count, @($fps | Where-Object { $_.slow -gt 0 }).Count))
     $report.Add(("frames that missed a vblank: {0} in {1} s, in {2} of those seconds" -f $l.Sum, $fps.Count, @($fps | Where-Object { $_.late -gt 0 }).Count))
+    $progs = $perf | ForEach-Object { if ($_ -match 'programs (\d+) compiled, (\d+) from the cache') { [pscustomobject]@{ c = [int]$Matches[1]; l = [int]$Matches[2] } } }
+    if ($progs) {
+        $report.Add(("programs: {0} compiled, {1} loaded from the cache" -f ($progs | Measure-Object c -Sum).Sum, ($progs | Measure-Object l -Sum).Sum))
+    }
 }
 $hitches = @($lines | Where-Object { $_ -like "[[]HITCH]*" })
 $freezes = @($lines | Where-Object { $_ -like "[[]FREEZE] no frame*" })
